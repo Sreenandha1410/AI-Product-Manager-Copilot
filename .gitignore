@@ -1,0 +1,12 @@
+﻿.venv/
+.venv-1/
+.venv-2/
+venv/
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+dist/
+build/
+.vscode/
