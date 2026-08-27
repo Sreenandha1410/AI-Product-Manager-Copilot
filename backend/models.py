@@ -59,18 +59,17 @@ class FeatureRequest(Base):
     __tablename__ = "feature_requests"
     __table_args__ = {"schema": "product_ai"}
 
-    id = Column(Integer, primary_key=True)
-    title = Column(String)
-    description = Column(Text)
-    votes = Column(Integer)
+    id = Column(Integer, primary_key=True, index=True)
 
-    submitted_by = Column(
-        String,
-        ForeignKey("product_ai.users.user_id")
-    )
+    title = Column(String(255), nullable=False)
 
-    request_date = Column(Date)
+    description = Column(Text, nullable=True)
 
+    votes = Column(Integer, default=0)
+
+    submitted_by = Column(String(100), nullable=True)
+
+    request_date = Column(Date, nullable=True)
 
 # =====================================================
 # SUPPORT TICKETS
@@ -169,6 +168,10 @@ class PriorityScore(Base):
 # PRD DOCUMENTS
 # =====================================================
 
+# =====================================================
+# PRD DOCUMENTS
+# =====================================================
+
 class PRDDocument(Base):
     __tablename__ = "prd_documents"
     __table_args__ = {"schema": "product_ai"}
@@ -181,15 +184,27 @@ class PRDDocument(Base):
     )
 
     title = Column(String)
+
     problem_statement = Column(Text)
+
     objectives = Column(Text)
+
     user_stories = Column(Text)
+
+    functional_requirements = Column(Text)
+
+    non_functional_requirements = Column(Text)
+
     acceptance_criteria = Column(Text)
+
+    risks = Column(Text)
+
     success_metrics = Column(Text)
 
-    created_at = Column(DateTime, default=func.now())
-
-
+    created_at = Column(
+        DateTime,
+        default=func.now()
+    )
 # =====================================================
 # ROADMAP ITEMS
 # =====================================================

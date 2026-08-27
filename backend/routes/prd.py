@@ -1,6 +1,7 @@
 # backend/routes/prd.py
 
 import re
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -16,32 +17,26 @@ router = APIRouter(
 )
 
 
-# =========================================================
+# ============================================================
 # REQUEST MODEL
-# =========================================================
+# ============================================================
 
 class PRDRequest(BaseModel):
     feature_id: int | None = None
+
     feature_name: str
     description: str
-    priority: str
-    business_goal: str
-    target_users: str
+
+    priority: str = "Medium"
+    business_goal: str = ""
+    target_users: str = ""
 
 
-# =========================================================
-# GEMINI RESPONSE → TEXT
-# =========================================================
+# ============================================================
+# GEMINI RESPONSE -> TEXT
+# ============================================================
 
 def _content_to_text(content) -> str:
-    """
-    Converts Gemini/LangChain response content into plain text.
-
-    Gemini may return:
-    - a normal string
-    - a list of strings
-    - a list of dictionaries containing text
-    """
 
     if content is None:
         return ""
@@ -50,6 +45,7 @@ def _content_to_text(content) -> str:
         return content
 
     if isinstance(content, list):
+
         parts = []
 
         for item in content:
@@ -58,11 +54,13 @@ def _content_to_text(content) -> str:
                 parts.append(item)
 
             elif isinstance(item, dict):
-                # Common LangChain/Gemini format
+
                 if "text" in item:
                     parts.append(str(item["text"]))
+
                 elif "content" in item:
                     parts.append(str(item["content"]))
+
                 else:
                     parts.append(str(item))
 
@@ -74,34 +72,27 @@ def _content_to_text(content) -> str:
     return str(content)
 
 
-# =========================================================
+# ============================================================
 # EXTRACT PRD SECTION
-# =========================================================
+# ============================================================
 
-def _extract(content, heading: str) -> str:
+def _extract(content: str, heading: str) -> str:
 
-    # Make sure content is always a string
     content = _content_to_text(content)
 
     if not content:
         return ""
 
-    # Example:
-    #
-    # 2. Problem Statement
-    # Some text...
-    #
-    # 3. Objectives
-    #
     pattern = rf"""
         (?:^|\n)
+        \s*
         (?:\d+\.\s*)?
         {re.escape(heading)}
         \s*:?
         \s*\n
         (.*?)
         (?=
-            \n\d+\.\s
+            \n\s*(?:\d+\.\s+)
             |
             \Z
         )
@@ -110,7 +101,9 @@ def _extract(content, heading: str) -> str:
     match = re.search(
         pattern,
         content,
-        re.DOTALL | re.IGNORECASE | re.VERBOSE
+        re.DOTALL |
+        re.IGNORECASE |
+        re.VERBOSE
     )
 
     if match:
@@ -119,9 +112,54 @@ def _extract(content, heading: str) -> str:
     return ""
 
 
-# =========================================================
+# ============================================================
+# SERIALIZE PRD
+# ============================================================
+
+def _serialize_prd(prd: PRDDocument) -> dict:
+
+    return {
+        "id": prd.id,
+
+        # Return all aliases for frontend compatibility
+        "prd_id": prd.id,
+        "document_id": prd.id,
+
+        "feature_id": prd.feature_id,
+
+        "title": prd.title,
+
+        "problem_statement": (
+            prd.problem_statement or ""
+        ),
+
+        "objectives": (
+            prd.objectives or ""
+        ),
+
+        "user_stories": (
+            prd.user_stories or ""
+        ),
+
+        "acceptance_criteria": (
+            prd.acceptance_criteria or ""
+        ),
+
+        "success_metrics": (
+            prd.success_metrics or ""
+        ),
+
+        "created_at": (
+            str(prd.created_at)[:10]
+            if prd.created_at
+            else ""
+        ),
+    }
+
+
+# ============================================================
 # GET ALL PRDs
-# =========================================================
+# ============================================================
 
 @router.get("/")
 def get_prds():
@@ -132,35 +170,24 @@ def get_prds():
 
         prds = (
             db.query(PRDDocument)
-            .order_by(PRDDocument.created_at.desc())
+            .order_by(
+                PRDDocument.created_at.desc()
+            )
             .all()
         )
 
         return [
-            {
-                "id": p.id,
-                "title": p.title,
-                "problem_statement": p.problem_statement,
-                "objectives": p.objectives,
-                "user_stories": p.user_stories,
-                "acceptance_criteria": p.acceptance_criteria,
-                "success_metrics": p.success_metrics,
-                "created_at": (
-                    str(p.created_at)[:10]
-                    if p.created_at
-                    else ""
-                ),
-            }
-            for p in prds
+            _serialize_prd(prd)
+            for prd in prds
         ]
 
     finally:
         db.close()
 
 
-# =========================================================
+# ============================================================
 # GENERATE PRD
-# =========================================================
+# ============================================================
 
 @router.post("/generate")
 def generate_prd(data: PRDRequest):
@@ -168,24 +195,25 @@ def generate_prd(data: PRDRequest):
     prompt = f"""
 You are a senior product manager.
 
-Create a detailed Product Requirements Document (PRD).
+Create a professional and implementation-oriented
+Product Requirements Document (PRD).
 
-Feature Name:
+PRODUCT REQUEST
 {data.feature_name}
 
-Description:
+DESCRIPTION
 {data.description}
 
-Priority:
+PRIORITY
 {data.priority}
 
-Business Goal:
+BUSINESS GOAL
 {data.business_goal}
 
-Target Users:
+TARGET USERS
 {data.target_users}
 
-Write the PRD using exactly these numbered sections:
+Use exactly these numbered sections:
 
 1. Overview
 2. Problem Statement
@@ -196,35 +224,35 @@ Write the PRD using exactly these numbered sections:
 7. Acceptance Criteria
 8. Success Metrics
 
-For User Stories, use this format:
+User Stories must use:
 
 As a [user],
 I want [goal],
 so that [benefit].
 
+Make the requirements practical and specific.
+
 Return ONLY the PRD.
-Do not add explanations outside the PRD.
+Do not include explanations outside the PRD.
 """
 
-    # -----------------------------------------------------
+    # ========================================================
     # CALL GEMINI
-    # -----------------------------------------------------
+    # ========================================================
 
     try:
 
         response = llm.invoke(prompt)
 
-        # Gemini/LangChain response
         if hasattr(response, "content"):
             ai_content = response.content
         else:
             ai_content = response
 
-        # IMPORTANT:
-        # Convert list/dict response to string
         ai_content = _content_to_text(ai_content)
 
         if not ai_content.strip():
+
             raise HTTPException(
                 status_code=500,
                 detail="Gemini returned an empty response."
@@ -235,79 +263,150 @@ Do not add explanations outside the PRD.
 
     except Exception as e:
 
+        error_message = str(e)
+
+        if (
+            "429" in error_message
+            or "quota" in error_message.lower()
+            or "RESOURCE_EXHAUSTED" in error_message
+        ):
+
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Gemini API quota exceeded. "
+                    "Please try again later."
+                )
+            )
+
         raise HTTPException(
             status_code=500,
-            detail=f"LLM error: {e}"
+            detail=f"LLM error: {error_message}"
         )
 
-
-    # -----------------------------------------------------
+    # ========================================================
     # EXTRACT SECTIONS
-    # -----------------------------------------------------
+    # ========================================================
 
     problem = (
-        _extract(ai_content, "Problem Statement")
+        _extract(
+            ai_content,
+            "Problem Statement"
+        )
         or data.description
     )
 
     objectives = (
-        _extract(ai_content, "Objectives")
+        _extract(
+            ai_content,
+            "Objectives"
+        )
         or data.business_goal
+        or "Improve the product experience."
     )
 
     user_stories = (
-        _extract(ai_content, "User Stories")
-        or f"As a {data.target_users}, I want {data.feature_name}."
+        _extract(
+            ai_content,
+            "User Stories"
+        )
+        or (
+            f"As a {data.target_users or 'user'}, "
+            f"I want {data.feature_name}, "
+            f"so that I can achieve the intended benefit."
+        )
     )
 
     acceptance_criteria = (
-        _extract(ai_content, "Acceptance Criteria")
-        or "See full PRD for acceptance criteria."
+        _extract(
+            ai_content,
+            "Acceptance Criteria"
+        )
+        or (
+            "The feature should satisfy all "
+            "defined functional requirements."
+        )
     )
 
     success_metrics = (
-        _extract(ai_content, "Success Metrics")
-        or f"Measure adoption and user satisfaction for {data.feature_name}."
+        _extract(
+            ai_content,
+            "Success Metrics"
+        )
+        or (
+            f"Measure adoption, usage and "
+            f"user satisfaction for {data.feature_name}."
+        )
     )
 
-
-    # -----------------------------------------------------
-    # SAVE PRD TO DATABASE
-    # -----------------------------------------------------
+    # ========================================================
+    # SAVE PRD
+    # ========================================================
 
     db: Session = SessionLocal()
 
     try:
 
         prd = PRDDocument(
+
+            # Can be NULL.
+            # Roadmap generation does NOT depend on
+            # FeatureRequest anymore.
             feature_id=data.feature_id,
+
             title=data.feature_name,
+
             problem_statement=problem,
+
             objectives=objectives,
+
             user_stories=user_stories,
+
             acceptance_criteria=acceptance_criteria,
+
             success_metrics=success_metrics,
         )
 
         db.add(prd)
+
         db.commit()
+
         db.refresh(prd)
 
-        # -------------------------------------------------
-        # RETURN RESULT
-        # -------------------------------------------------
-
         return {
+            "success": True,
+
+            "message":
+                "PRD generated and saved successfully.",
+
             "prd": ai_content,
+
+            "id": prd.id,
+
+            "prd_id": prd.id,
 
             "document_id": prd.id,
 
+            "feature_id": prd.feature_id,
+
+            "title": prd.title,
+
             "sections": {
-                "problem_statement": prd.problem_statement,
-                "objectives": prd.objectives,
-                "user_stories": prd.user_stories,
-                "acceptance_criteria": prd.acceptance_criteria,
-                "success_metrics": prd.success_metrics,
+
+                "problem_statement":
+                    prd.problem_statement,
+
+                "objectives":
+                    prd.objectives,
+
+                "user_stories":
+                    prd.user_stories,
+
+                "acceptance_criteria":
+                    prd.acceptance_criteria,
+
+                "success_metrics":
+                    prd.success_metrics,
             }
         }
 
@@ -317,16 +416,16 @@ Do not add explanations outside the PRD.
 
         raise HTTPException(
             status_code=500,
-            detail=f"DB error: {e}"
+            detail=f"DB error: {str(e)}"
         )
 
     finally:
         db.close()
 
 
-# =========================================================
+# ============================================================
 # GET SINGLE PRD
-# =========================================================
+# ============================================================
 
 @router.get("/{prd_id}")
 def get_prd(prd_id: int):
@@ -335,33 +434,22 @@ def get_prd(prd_id: int):
 
     try:
 
-        p = (
+        prd = (
             db.query(PRDDocument)
-            .filter(PRDDocument.id == prd_id)
+            .filter(
+                PRDDocument.id == prd_id
+            )
             .first()
         )
 
-        if not p:
+        if not prd:
 
             raise HTTPException(
                 status_code=404,
                 detail="PRD not found."
             )
 
-        return {
-            "id": p.id,
-            "title": p.title,
-            "problem_statement": p.problem_statement,
-            "objectives": p.objectives,
-            "user_stories": p.user_stories,
-            "acceptance_criteria": p.acceptance_criteria,
-            "success_metrics": p.success_metrics,
-            "created_at": (
-                str(p.created_at)[:10]
-                if p.created_at
-                else ""
-            ),
-        }
+        return _serialize_prd(prd)
 
     finally:
         db.close()

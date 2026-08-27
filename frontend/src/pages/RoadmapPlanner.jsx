@@ -1,82 +1,34 @@
 // src/pages/RoadmapPlanner.jsx
 
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useState } from "react";
 import {
-  Calendar,
   Plus,
+  X,
   Sparkles,
-  Trash2,
-  FileText,
-  CheckCircle,
+  CheckCircle2,
+  Clock3,
+  Circle,
+  Loader2,
 } from "lucide-react";
 
-import {
-  Card,
-  CardHeader,
-  CardTitle,
-  CardContent,
-} from "../components/ui/Card";
+const API_BASE_URL = "http://localhost:8000";
 
-import { Button } from "../components/ui/Button";
-import { Badge } from "../components/ui/Badge";
-import { Input } from "../components/ui/Input";
-import { Modal } from "../components/ui/Modal";
+export default function RoadmapPlanner() {
+  const [showModal, setShowModal] = useState(false);
+  const [productRequest, setProductRequest] = useState("");
 
-import { useAuth } from "../contexts/AuthContext";
-import api from "../services/api";
-
-
-const QUARTERS = ["Q1", "Q2", "Q3", "Q4"];
-
-const STATUS_OPTIONS = [
-  "Planned",
-  "In Progress",
-  "Completed",
-  "Backlog",
-];
-
-const PROGRESS_MAP = {
-  Completed: 100,
-  "In Progress": 65,
-  Planned: 0,
-  Backlog: 0,
-};
-
-
-/* ============================================================
-   PRODUCT REQUEST + PRD + ROADMAP MODAL
-============================================================ */
-
-function ProductPlanningModal({
-  isOpen,
-  onClose,
-  onSuccess,
-}) {
-  const { user } = useAuth();
-
-  const [request, setRequest] = useState("");
   const [loading, setLoading] = useState(false);
-  const [step, setStep] = useState("");
   const [error, setError] = useState("");
+
   const [prd, setPrd] = useState(null);
+  const [roadmap, setRoadmap] = useState([]);
 
-  const reset = () => {
-    setRequest("");
-    setLoading(false);
-    setStep("");
-    setError("");
-    setPrd(null);
-  };
-
-  const handleClose = () => {
-    if (loading) return;
-
-    reset();
-    onClose();
-  };
+  // ---------------------------------------------------------
+  // CREATE PRD + ROADMAP
+  // ---------------------------------------------------------
 
   const handleGenerate = async () => {
-    if (!request.trim()) {
+    if (!productRequest.trim()) {
       setError("Please enter a product request.");
       return;
     }
@@ -84,1027 +36,828 @@ function ProductPlanningModal({
     setLoading(true);
     setError("");
     setPrd(null);
+    setRoadmap([]);
 
     try {
-      /* -------------------------------------------------------
-         STEP 1: Create Feature Request
-      ------------------------------------------------------- */
+      // -----------------------------------------------------
+      // STEP 1: Generate PRD
+      // -----------------------------------------------------
 
-      setStep("Creating feature request...");
+      const prdResponse = await fetch(
+        `${API_BASE_URL}/prd/generate`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            feature_name: productRequest.trim(),
+            description: productRequest.trim(),
+            priority: "High",
+            business_goal:
+              "Improve product usability and customer satisfaction.",
+            target_users: "Product users",
+          }),
+        }
+      );
 
-      const featureResponse = await api.post("/feature-requests/", {
-  title:
-    request.trim().length > 150
-      ? request.trim().slice(0, 147) + "..."
-      : request.trim(),
+      const prdData = await prdResponse.json();
 
-  description: request.trim(),
-
-  votes: 0,
-
-  user_id: user?.user_id || null,
-});
-
-const feature = featureResponse.data;
-
-      if (!feature || !feature.id) {
+      if (!prdResponse.ok) {
         throw new Error(
-          "Feature request was created, but no feature ID was returned."
+          prdData.detail || "Failed to generate PRD."
         );
       }
 
-
-      /* -------------------------------------------------------
-         STEP 2: Generate PRD
-      ------------------------------------------------------- */
-
-      setStep("Generating PRD...");
-
-      const prdResponse = await api.post(
-  "/prd/generate",
-  {
-    feature_name: feature.title,
-    description: feature.description || request.trim(),
-    priority: "High",
-    business_goal: request.trim(),
-    target_users: "Existing product users",
-  }
-);
-
-      const generatedPrd = prdResponse.data;
-
-      setPrd(generatedPrd);
-
-
-      /* -------------------------------------------------------
-         STEP 3: Create Roadmap
-      ------------------------------------------------------- */
-
-      setStep("Creating roadmap...");
-
-      /*
-       * The existing roadmap_items table is linked to
-       * feature_requests using feature_id.
-       *
-       * Therefore the generated roadmap items use the
-       * same feature created from the user's request.
-       */
-
-      const roadmapItems = [
-        {
-          phase: "Q1",
-          status: "Planned",
-        },
-        {
-          phase: "Q2",
-          status: "Planned",
-        },
-        {
-          phase: "Q3",
-          status: "Planned",
-        },
-        {
-          phase: "Q4",
-          status: "Planned",
-        },
-      ];
-
-      for (const item of roadmapItems) {
-        await api.post("/roadmap/", {
-          feature_id: feature.id,
-          phase: item.phase,
-          status: item.status,
-          user_id: user?.user_id || null,
-        });
+      if (!prdData.document_id) {
+        throw new Error("PRD was generated but no PRD ID was returned.");
       }
 
+      setPrd(prdData);
 
-      /* -------------------------------------------------------
-         COMPLETE
-      ------------------------------------------------------- */
+      // -----------------------------------------------------
+      // STEP 2: Generate Roadmap from PRD
+      // -----------------------------------------------------
 
-      setStep("Roadmap created successfully.");
-
-      await onSuccess();
-
-      setTimeout(() => {
-        reset();
-        onClose();
-      }, 700);
-
-    } catch (err) {
-      console.error(
-        "Product planning error:",
-        err
+      const roadmapResponse = await fetch(
+        `${API_BASE_URL}/roadmap/generate`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            prd_id: prdData.document_id,
+          }),
+        }
       );
 
-      const message =
-        err?.response?.data?.detail ||
-        err?.message ||
-        "Something went wrong while creating the roadmap.";
+      const roadmapData = await roadmapResponse.json();
 
-      setError(message);
-      setStep("");
+      if (!roadmapResponse.ok) {
+        throw new Error(
+          roadmapData.detail || "Failed to generate roadmap."
+        );
+      }
+
+      // -----------------------------------------------------
+      // NORMALIZE ROADMAP RESPONSE
+      // -----------------------------------------------------
+
+      const items =
+        roadmapData.items ||
+        roadmapData.roadmap ||
+        roadmapData.data ||
+        [];
+
+      const normalizedItems = Array.isArray(items)
+        ? items.map((item, index) => ({
+            id: item.id || index + 1,
+
+            title:
+              item.title ||
+              item.name ||
+              item.feature ||
+              `Roadmap Item ${index + 1}`,
+
+            status:
+              item.status ||
+              (index === 0 ? "In Progress" : "Planned"),
+
+            progress:
+              typeof item.progress === "number"
+                ? item.progress
+                : index === 0
+                ? 65
+                : 0,
+          }))
+        : [];
+
+      setRoadmap(normalizedItems);
+
+      setShowModal(false);
+    } catch (err) {
+      console.error("Roadmap generation error:", err);
+
+      setError(
+        err.message ||
+          "Something went wrong while generating the roadmap."
+      );
     } finally {
       setLoading(false);
     }
   };
 
+  // ---------------------------------------------------------
+  // STATUS ICON
+  // ---------------------------------------------------------
+
+  const getStatusIcon = (status) => {
+    const value = status?.toLowerCase();
+
+    if (value === "completed") {
+      return <CheckCircle2 size={17} />;
+    }
+
+    if (value === "in progress") {
+      return <Clock3 size={17} />;
+    }
+
+    return <Circle size={17} />;
+  };
+
+  // ---------------------------------------------------------
+  // STATUS CLASS
+  // ---------------------------------------------------------
+
+  const getStatusClass = (status) => {
+    const value = status?.toLowerCase();
+
+    if (value === "completed") {
+      return "status completed";
+    }
+
+    if (value === "in progress") {
+      return "status progress";
+    }
+
+    return "status planned";
+  };
+
+  // ---------------------------------------------------------
+  // MAIN UI
+  // ---------------------------------------------------------
 
   return (
-    <Modal
-      isOpen={isOpen}
-      onClose={handleClose}
-      title="Create Product Roadmap"
-    >
-      <div className="space-y-5">
+    <div className="roadmap-page">
 
-        {/* Product Request */}
+      {/* ---------------------------------------------------
+          HEADER
+      --------------------------------------------------- */}
 
+      <div className="roadmap-header">
         <div>
-          <label className="block text-sm font-medium text-text-primary mb-1.5">
-            Product Request
-          </label>
+          <h1>Roadmap Planner</h1>
 
-          <textarea
-            value={request}
-            onChange={(e) => setRequest(e.target.value)}
-            disabled={loading}
-            rows={5}
-            placeholder="Example: Users need a faster way to export reports as PDF."
-            className="w-full px-3 py-2.5 border border-border rounded-lg bg-background text-sm text-text-primary resize-none focus:outline-none focus:ring-1 focus:ring-primary"
-          />
-
-          <p className="text-xs text-text-secondary mt-1.5">
-            Enter the product problem or feature you want to plan.
+          <p>
+            Generate a product roadmap from your product request
+            and AI-generated PRD.
           </p>
         </div>
 
+        <button
+          className="create-roadmap-btn"
+          onClick={() => {
+            setShowModal(true);
+            setError("");
+          }}
+        >
+          <Plus size={18} />
+          Create Roadmap
+        </button>
+      </div>
 
-        {/* Progress */}
+      {/* ---------------------------------------------------
+          PRD STATUS
+      --------------------------------------------------- */}
 
-        {step && (
-          <div className="flex items-center gap-2 rounded-lg border border-primary/20 bg-primary/5 p-3 text-sm text-primary">
+      {prd && (
+        <div className="prd-success-card">
+          <div className="prd-icon">
+            <CheckCircle2 size={20} />
+          </div>
 
-            {loading ? (
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-            ) : (
-              <CheckCircle className="h-4 w-4" />
-            )}
+          <div>
+            <h3>PRD Generated</h3>
+            <p>
+              Product Requirements Document generated
+              successfully.
+            </p>
+          </div>
+        </div>
+      )}
 
-            <span>{step}</span>
+      {/* ---------------------------------------------------
+          ROADMAP CARDS
+      --------------------------------------------------- */}
+
+      <div className="roadmap-section">
+
+        <div className="section-title">
+          <div>
+            <h2>Product Roadmap</h2>
+            <p>
+              Development priorities generated from the PRD
+            </p>
+          </div>
+        </div>
+
+        {roadmap.length === 0 ? (
+          <div className="empty-roadmap">
+            <Sparkles size={35} />
+
+            <h3>No roadmap generated yet</h3>
+
+            <p>
+              Enter a product request to generate a PRD and
+              create your roadmap automatically.
+            </p>
+
+            <button
+              className="empty-create-btn"
+              onClick={() => setShowModal(true)}
+            >
+              <Plus size={17} />
+              Create Roadmap
+            </button>
+          </div>
+        ) : (
+          <div className="roadmap-grid">
+
+            {roadmap.map((item) => (
+              <div
+                className="roadmap-card"
+                key={item.id}
+              >
+
+                {/* CARD HEADER */}
+
+                <div className="card-header">
+
+                  <h3>{item.title}</h3>
+
+                  <span className={getStatusClass(item.status)}>
+                    {getStatusIcon(item.status)}
+                    {item.status}
+                  </span>
+
+                </div>
+
+                {/* PROGRESS */}
+
+                <div className="progress-section">
+
+                  <div className="progress-label">
+
+                    <span>Progress</span>
+
+                    <strong>
+                      {item.progress}%
+                    </strong>
+
+                  </div>
+
+                  <div className="progress-bar">
+
+                    <div
+                      className="progress-fill"
+                      style={{
+                        width: `${Math.min(
+                          Math.max(item.progress, 0),
+                          100
+                        )}%`,
+                      }}
+                    />
+
+                  </div>
+
+                </div>
+
+              </div>
+            ))}
 
           </div>
         )}
+      </div>
 
+      {/* ---------------------------------------------------
+          CREATE ROADMAP MODAL
+      --------------------------------------------------- */}
 
-        {/* Generated PRD */}
+      {showModal && (
+        <div className="modal-overlay">
 
-        {prd && (
-          <div className="rounded-lg border border-border bg-surface-hover/50 p-4">
+          <div className="roadmap-modal">
 
-            <div className="flex items-center gap-2 mb-2">
+            {/* MODAL HEADER */}
 
-              <FileText className="h-4 w-4 text-primary" />
+            <div className="modal-header">
 
-              <span className="text-sm font-semibold text-text-primary">
-                PRD Generated
-              </span>
+              <div>
+                <h2>Create Product Roadmap</h2>
+
+                <p>
+                  Start with a product request. AI will generate
+                  the PRD and roadmap automatically.
+                </p>
+              </div>
+
+              <button
+                className="close-btn"
+                onClick={() => {
+                  if (!loading) {
+                    setShowModal(false);
+                    setError("");
+                  }
+                }}
+              >
+                <X size={21} />
+              </button>
 
             </div>
 
-            <p className="text-sm text-text-secondary">
-              {prd.title ||
-                prd.name ||
-                "Product Requirements Document generated successfully."}
-            </p>
+            {/* INPUT */}
 
-          </div>
-        )}
+            <div className="form-group">
 
+              <label>Product Request</label>
 
-        {/* Error */}
-
-        {error && (
-          <div className="rounded-lg border border-danger/20 bg-danger/5 p-3 text-sm text-danger">
-            {error}
-          </div>
-        )}
-
-
-        {/* Buttons */}
-
-        <div className="flex justify-end gap-3 pt-2">
-
-          <Button
-            variant="outline"
-            onClick={handleClose}
-            disabled={loading}
-          >
-            Cancel
-          </Button>
-
-          <Button
-            onClick={handleGenerate}
-            disabled={
-              loading ||
-              !request.trim()
-            }
-          >
-            {loading ? (
-              "Processing..."
-            ) : (
-              <>
-                <Sparkles className="mr-2 h-4 w-4" />
-                Generate PRD & Roadmap
-              </>
-            )}
-          </Button>
-
-        </div>
-
-      </div>
-    </Modal>
-  );
-}
-
-
-/* ============================================================
-   ADD MILESTONE MODAL
-============================================================ */
-
-function AddMilestoneModal({
-  isOpen,
-  onClose,
-  onSuccess,
-}) {
-  const { user } = useAuth();
-
-  const [title, setTitle] = useState("");
-  const [phase, setPhase] = useState("Q1");
-  const [status, setStatus] = useState("Planned");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-
-  const reset = () => {
-    setTitle("");
-    setPhase("Q1");
-    setStatus("Planned");
-    setError("");
-  };
-
-  const handleCreate = async () => {
-
-    if (!title.trim()) {
-      setError("Title is required.");
-      return;
-    }
-
-    setBusy(true);
-    setError("");
-
-    try {
-
-      /*
-       * Existing backend supports creating a feature request
-       * automatically when only title is provided.
-       */
-
-      await api.post("/roadmap/", {
-        title: title.trim(),
-        phase: phase,
-        status: status,
-        user_id: user?.user_id || null,
-      });
-
-      await onSuccess();
-
-      reset();
-      onClose();
-
-    } catch (err) {
-
-      console.error(
-        "Milestone creation error:",
-        err
-      );
-
-      setError(
-        err?.response?.data?.detail ||
-        "Failed to create milestone."
-      );
-
-    } finally {
-      setBusy(false);
-    }
-  };
-
-
-  return (
-    <Modal
-      isOpen={isOpen}
-      onClose={() => {
-        if (!busy) {
-          reset();
-          onClose();
-        }
-      }}
-      title="Add Milestone"
-    >
-
-      <div className="space-y-4">
-
-        {/* Title */}
-
-        <div>
-
-          <label className="block text-sm font-medium text-text-primary mb-1.5">
-            Title
-            <span className="text-danger ml-1">
-              *
-            </span>
-          </label>
-
-          <Input
-            value={title}
-            onChange={(e) =>
-              setTitle(e.target.value)
-            }
-            disabled={busy}
-            placeholder="e.g., Authentication & Security"
-          />
-
-        </div>
-
-
-        {/* Quarter */}
-
-        <div>
-
-          <label className="block text-sm font-medium text-text-primary mb-1.5">
-            Quarter
-          </label>
-
-          <select
-            value={phase}
-            onChange={(e) =>
-              setPhase(e.target.value)
-            }
-            disabled={busy}
-            className="w-full h-10 px-3 border border-border rounded-lg bg-background text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-primary"
-          >
-
-            {QUARTERS.map((quarter) => (
-              <option
-                key={quarter}
-                value={quarter}
-              >
-                {quarter}
-              </option>
-            ))}
-
-          </select>
-
-        </div>
-
-
-        {/* Status */}
-
-        <div>
-
-          <label className="block text-sm font-medium text-text-primary mb-1.5">
-            Status
-          </label>
-
-          <select
-            value={status}
-            onChange={(e) =>
-              setStatus(e.target.value)
-            }
-            disabled={busy}
-            className="w-full h-10 px-3 border border-border rounded-lg bg-background text-sm text-text-primary focus:outline-none focus:ring-1 focus:ring-primary"
-          >
-
-            {STATUS_OPTIONS.map((item) => (
-              <option
-                key={item}
-                value={item}
-              >
-                {item}
-              </option>
-            ))}
-
-          </select>
-
-        </div>
-
-
-        {/* Error */}
-
-        {error && (
-          <p className="text-sm text-danger">
-            {error}
-          </p>
-        )}
-
-
-        {/* Buttons */}
-
-        <div className="flex gap-3 justify-end pt-2">
-
-          <Button
-            variant="outline"
-            onClick={() => {
-              reset();
-              onClose();
-            }}
-            disabled={busy}
-          >
-            Cancel
-          </Button>
-
-          <Button
-            onClick={handleCreate}
-            disabled={
-              busy ||
-              !title.trim()
-            }
-          >
-            {busy
-              ? "Creating..."
-              : "Add Milestone"}
-          </Button>
-
-        </div>
-
-      </div>
-
-    </Modal>
-  );
-}
-
-
-/* ============================================================
-   ROADMAP CARD
-============================================================ */
-
-function RoadmapCard({
-  item,
-  onStatusChange,
-  onDelete,
-}) {
-
-  const status =
-    item.status || "Planned";
-
-  const progress =
-    PROGRESS_MAP[status] || 0;
-
-
-  return (
-    <div className="flex flex-col p-4 bg-background border border-border rounded-lg shadow-sm hover:border-primary/50 transition-colors group relative">
-
-      {/* Delete */}
-
-      <button
-        onClick={() =>
-          onDelete(item.id)
-        }
-        title="Delete milestone"
-        className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity p-1 text-text-muted hover:text-danger"
-      >
-        <Trash2 className="h-3.5 w-3.5" />
-      </button>
-
-
-      {/* Title */}
-
-      <h4 className="font-medium text-sm text-text-primary leading-snug pr-6 mb-3">
-
-        {item.title ||
-          "Roadmap Initiative"}
-
-      </h4>
-
-
-      {/* Status */}
-
-      <div className="flex items-center justify-between mb-3">
-
-        <select
-          value={status}
-          onChange={(e) =>
-            onStatusChange(
-              item.id,
-              e.target.value
-            )
-          }
-          className="text-xs border border-border rounded-md px-1.5 py-1 bg-background text-text-primary focus:outline-none focus:ring-1 focus:ring-primary"
-        >
-
-          {STATUS_OPTIONS.map((itemStatus) => (
-            <option
-              key={itemStatus}
-              value={itemStatus}
-            >
-              {itemStatus}
-            </option>
-          ))}
-
-        </select>
-
-
-        <span className="text-[10px] text-text-muted">
-          Feature #{item.feature_id || "-"}
-        </span>
-
-      </div>
-
-
-      {/* Progress */}
-
-      <div className="flex items-center gap-2">
-
-        <div className="h-1.5 flex-1 bg-surface-hover rounded-full overflow-hidden">
-
-          <div
-            className={
-              "h-full rounded-full transition-all duration-300 " +
-              (
-                progress === 100
-                  ? "bg-success"
-                  : "bg-primary"
-              )
-            }
-            style={{
-              width: `${progress}%`,
-            }}
-          />
-
-        </div>
-
-        <span className="text-[10px] text-text-secondary w-7 text-right">
-          {progress}%
-        </span>
-
-      </div>
-
-    </div>
-  );
-}
-
-
-/* ============================================================
-   MAIN ROADMAP PLANNER
-============================================================ */
-
-export function RoadmapPlanner() {
-
-  const [roadmap, setRoadmap] =
-    useState([]);
-
-  const [loading, setLoading] =
-    useState(true);
-
-  const [showPlanningModal, setShowPlanningModal] =
-    useState(false);
-
-  const [showMilestoneModal, setShowMilestoneModal] =
-    useState(false);
-
-  const [message, setMessage] =
-    useState("");
-
-
-  /* ==========================================================
-     FETCH ROADMAP
-  ========================================================== */
-
-  const fetchRoadmap = useCallback(
-    async () => {
-
-      try {
-
-        const response =
-          await api.get("/roadmap/");
-
-        const data =
-          Array.isArray(response.data)
-            ? response.data
-            : [];
-
-        const counters = {};
-
-        const formatted =
-          data.map((item) => {
-
-            const quarter =
-              item.quarter ||
-              item.phase ||
-              "Q1";
-
-            counters[quarter] =
-              (counters[quarter] || 0) + 1;
-
-            return {
-              ...item,
-              quarter: quarter,
-              order: counters[quarter],
-            };
-          });
-
-        setRoadmap(formatted);
-
-      } catch (err) {
-
-        console.error(
-          "Failed to load roadmap:",
-          err
-        );
-
-      }
-
-    },
-    []
-  );
-
-
-  /* ==========================================================
-     INITIAL LOAD
-  ========================================================== */
-
-  useEffect(() => {
-
-    const load = async () => {
-
-      setLoading(true);
-
-      await fetchRoadmap();
-
-      setLoading(false);
-
-    };
-
-    load();
-
-  }, [fetchRoadmap]);
-
-
-  /* ==========================================================
-     STATUS UPDATE
-  ========================================================== */
-
-  const handleStatusChange =
-    async (id, status) => {
-
-      try {
-
-        await api.put(
-          `/roadmap/${id}/status?status=${encodeURIComponent(status)}`
-        );
-
-        setRoadmap((previous) =>
-          previous.map((item) =>
-            item.id === id
-              ? {
-                  ...item,
-                  status: status,
-                  progress:
-                    PROGRESS_MAP[status] || 0,
+              <textarea
+                value={productRequest}
+                onChange={(e) =>
+                  setProductRequest(e.target.value)
                 }
-              : item
-          )
-        );
+                placeholder="Example: Add dark mode to the application"
+                rows={5}
+                disabled={loading}
+              />
 
-      } catch (err) {
+              <small>
+                Enter the product problem or feature you want
+                to build.
+              </small>
 
-        console.error(
-          "Failed to update status:",
-          err
-        );
+            </div>
 
-        alert(
-          err?.response?.data?.detail ||
-          "Failed to update status."
-        );
+            {/* PRD STATUS */}
 
-      }
+            {prd && (
+              <div className="generated-box">
 
-    };
+                <CheckCircle2 size={20} />
 
+                <div>
+                  <strong>PRD Generated</strong>
 
-  /* ==========================================================
-     DELETE
-  ========================================================== */
-
-  const handleDelete =
-    async (id) => {
-
-      if (
-        !window.confirm(
-          "Delete this roadmap item?"
-        )
-      ) {
-        return;
-      }
-
-      try {
-
-        await api.delete(
-          `/roadmap/${id}`
-        );
-
-        setRoadmap((previous) =>
-          previous.filter(
-            (item) => item.id !== id
-          )
-        );
-
-      } catch (err) {
-
-        console.error(
-          "Failed to delete roadmap item:",
-          err
-        );
-
-        alert(
-          err?.response?.data?.detail ||
-          "Failed to delete roadmap item."
-        );
-
-      }
-
-    };
-
-
-  /* ==========================================================
-     SUCCESS
-  ========================================================== */
-
-  const handlePlanningSuccess =
-    async () => {
-
-      await fetchRoadmap();
-
-      setMessage(
-        "PRD generated and roadmap created successfully."
-      );
-
-      setTimeout(
-        () => setMessage(""),
-        4000
-      );
-
-    };
-
-
-  /* ==========================================================
-     LOADING
-  ========================================================== */
-
-  if (loading) {
-
-    return (
-      <div className="flex items-center justify-center h-64">
-
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
-
-      </div>
-    );
-  }
-
-
-  /* ==========================================================
-     PAGE
-  ========================================================== */
-
-  return (
-
-    <div className="space-y-6">
-
-      {/* HEADER */}
-
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-
-        <div>
-
-          <h1 className="text-2xl font-bold tracking-tight text-text-primary">
-            Roadmap Planner
-          </h1>
-
-          <p className="mt-1 text-sm text-text-secondary">
-            Create a product request, generate its PRD, and plan the roadmap.
-          </p>
-
-        </div>
-
-
-        <div className="flex gap-3">
-
-          <Button
-            variant="outline"
-            onClick={() =>
-              setShowPlanningModal(true)
-            }
-            className="text-primary border-primary/20 bg-primary/5 hover:bg-primary/10"
-          >
-
-            <Sparkles className="mr-2 h-4 w-4" />
-
-            Plan Product
-
-          </Button>
-
-
-          <Button
-            onClick={() =>
-              setShowMilestoneModal(true)
-            }
-          >
-
-            <Plus className="mr-2 h-4 w-4" />
-
-            Add Milestone
-
-          </Button>
-
-        </div>
-
-      </div>
-
-
-      {/* SUCCESS MESSAGE */}
-
-      {message && (
-
-        <div className="flex items-center gap-2 rounded-lg border border-success/20 bg-success/5 p-3 text-sm text-success">
-
-          <CheckCircle className="h-4 w-4" />
-
-          {message}
-
-        </div>
-
-      )}
-
-
-      {/* WORKFLOW */}
-
-      <Card>
-
-        <CardContent className="p-4">
-
-          <div className="flex flex-wrap items-center gap-2 text-xs text-text-secondary">
-
-            <Badge variant="outline">
-              Product Request
-            </Badge>
-
-            <span>→</span>
-
-            <Badge variant="outline">
-              PRD
-            </Badge>
-
-            <span>→</span>
-
-            <Badge variant="outline">
-              Roadmap
-            </Badge>
-
-            <span>→</span>
-
-            <Badge variant="outline">
-              Q1 - Q4
-            </Badge>
-
-          </div>
-
-        </CardContent>
-
-      </Card>
-
-
-      {/* ROADMAP */}
-
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
-
-        {QUARTERS.map((quarter) => {
-
-          const items =
-            roadmap.filter(
-              (item) =>
-                (
-                  item.quarter ||
-                  item.phase
-                ) === quarter
-            );
-
-
-          return (
-
-            <Card
-              key={quarter}
-              className="bg-surface-hover/50 h-full flex flex-col"
-            >
-
-              <CardHeader className="pb-3 flex flex-row items-center justify-between shrink-0">
-
-                <CardTitle className="text-lg flex items-center">
-
-                  <Calendar className="mr-2 h-5 w-5 text-text-secondary" />
-
-                  {quarter}
-
-                </CardTitle>
-
-                <Badge variant="outline">
-                  {items.length}
-                </Badge>
-
-              </CardHeader>
-
-
-              <CardContent className="space-y-3 flex-1 overflow-y-auto">
-
-                {items.length === 0 ? (
-
-                  <p className="text-xs text-text-secondary text-center py-4">
-                    No items planned
+                  <p>
+                    Product Requirements Document generated
+                    successfully.
                   </p>
+                </div>
 
-                ) : (
+              </div>
+            )}
 
-                  items.map((item) => (
+            {/* ERROR */}
 
-                    <RoadmapCard
-                      key={item.id}
-                      item={item}
-                      onStatusChange={
-                        handleStatusChange
-                      }
-                      onDelete={
-                        handleDelete
-                      }
+            {error && (
+              <div className="error-box">
+                {error}
+              </div>
+            )}
+
+            {/* ACTIONS */}
+
+            <div className="modal-actions">
+
+              <button
+                className="cancel-btn"
+                onClick={() => {
+                  if (!loading) {
+                    setShowModal(false);
+                    setError("");
+                  }
+                }}
+                disabled={loading}
+              >
+                Cancel
+              </button>
+
+              <button
+                className="generate-btn"
+                onClick={handleGenerate}
+                disabled={loading}
+              >
+
+                {loading ? (
+                  <>
+                    <Loader2
+                      size={18}
+                      className="spin"
                     />
-
-                  ))
-
+                    Generating...
+                  </>
+                ) : (
+                  <>
+                    <Sparkles size={18} />
+                    Generate PRD & Roadmap
+                  </>
                 )}
 
+              </button>
 
-                {/* ADD */}
+            </div>
 
-                <button
-                  onClick={() =>
-                    setShowMilestoneModal(true)
-                  }
-                  className="w-full py-3 border-2 border-dashed border-border rounded-lg text-text-secondary text-sm font-medium hover:border-primary hover:text-primary transition-colors flex items-center justify-center"
-                >
+          </div>
 
-                  <Plus className="mr-2 h-4 w-4" />
+        </div>
+      )}
 
-                  Add initiative
+      {/* ---------------------------------------------------
+          STYLES
+      --------------------------------------------------- */}
 
-                </button>
+      <style>{`
 
-              </CardContent>
-
-            </Card>
-
-          );
-
-        })}
-
-      </div>
-
-
-      {/* PRODUCT PLANNING MODAL */}
-
-      <ProductPlanningModal
-        isOpen={showPlanningModal}
-        onClose={() =>
-          setShowPlanningModal(false)
+        * {
+          box-sizing: border-box;
         }
-        onSuccess={
-          handlePlanningSuccess
+
+        .roadmap-page {
+          padding: 30px;
+          min-height: 100vh;
+          background: #f8f9fc;
+          color: #172033;
         }
-      />
 
-
-      {/* ADD MILESTONE MODAL */}
-
-      <AddMilestoneModal
-        isOpen={showMilestoneModal}
-        onClose={() =>
-          setShowMilestoneModal(false)
+        .roadmap-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          margin-bottom: 30px;
         }
-        onSuccess={
-          fetchRoadmap
-        }
-      />
 
+        .roadmap-header h1 {
+          margin: 0;
+          font-size: 28px;
+          font-weight: 700;
+        }
+
+        .roadmap-header p {
+          margin-top: 7px;
+          color: #71809b;
+          font-size: 14px;
+        }
+
+        .create-roadmap-btn,
+        .generate-btn,
+        .empty-create-btn {
+          border: none;
+          background: #5b3df5;
+          color: white;
+          border-radius: 9px;
+          padding: 12px 18px;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          cursor: pointer;
+          font-weight: 600;
+        }
+
+        .create-roadmap-btn:hover,
+        .generate-btn:hover,
+        .empty-create-btn:hover {
+          background: #4b2fe0;
+        }
+
+        .prd-success-card {
+          background: white;
+          border: 1px solid #e5e8f0;
+          border-radius: 14px;
+          padding: 18px;
+          display: flex;
+          gap: 14px;
+          align-items: center;
+          margin-bottom: 25px;
+        }
+
+        .prd-icon {
+          width: 40px;
+          height: 40px;
+          border-radius: 10px;
+          background: #eeeaff;
+          color: #5b3df5;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .prd-success-card h3 {
+          margin: 0 0 4px;
+          font-size: 16px;
+        }
+
+        .prd-success-card p {
+          margin: 0;
+          color: #71809b;
+          font-size: 13px;
+        }
+
+        .roadmap-section {
+          background: transparent;
+        }
+
+        .section-title {
+          margin-bottom: 20px;
+        }
+
+        .section-title h2 {
+          margin: 0;
+          font-size: 21px;
+        }
+
+        .section-title p {
+          margin-top: 5px;
+          color: #71809b;
+          font-size: 13px;
+        }
+
+        .roadmap-grid {
+          display: grid;
+          grid-template-columns:
+            repeat(3, minmax(0, 1fr));
+          gap: 20px;
+        }
+
+        .roadmap-card {
+          background: white;
+          border: 1px solid #e5e8f0;
+          border-radius: 14px;
+          padding: 22px;
+          min-height: 170px;
+          box-shadow:
+            0 3px 10px rgba(35, 40, 60, 0.04);
+        }
+
+        .card-header {
+          display: flex;
+          flex-direction: column;
+          gap: 14px;
+        }
+
+        .card-header h3 {
+          margin: 0;
+          font-size: 17px;
+        }
+
+        .status {
+          width: fit-content;
+          padding: 5px 9px;
+          border-radius: 20px;
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          font-size: 11px;
+          font-weight: 600;
+        }
+
+        .status.progress {
+          background: #fff4df;
+          color: #d88700;
+        }
+
+        .status.planned {
+          background: #edf0f5;
+          color: #667085;
+        }
+
+        .status.completed {
+          background: #e7f8ef;
+          color: #15965c;
+        }
+
+        .progress-section {
+          margin-top: 25px;
+        }
+
+        .progress-label {
+          display: flex;
+          justify-content: space-between;
+          margin-bottom: 8px;
+          color: #7a8498;
+          font-size: 12px;
+        }
+
+        .progress-label strong {
+          color: #20283a;
+        }
+
+        .progress-bar {
+          height: 7px;
+          background: #eceef4;
+          border-radius: 10px;
+          overflow: hidden;
+        }
+
+        .progress-fill {
+          height: 100%;
+          background: #5b3df5;
+          border-radius: 10px;
+          transition: width 0.3s ease;
+        }
+
+        .empty-roadmap {
+          background: white;
+          border: 1px dashed #d9dce5;
+          border-radius: 14px;
+          min-height: 300px;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          text-align: center;
+          color: #6e7890;
+        }
+
+        .empty-roadmap svg {
+          color: #5b3df5;
+        }
+
+        .empty-roadmap h3 {
+          margin: 15px 0 5px;
+          color: #1b2335;
+        }
+
+        .empty-roadmap p {
+          max-width: 450px;
+          font-size: 13px;
+          line-height: 1.6;
+        }
+
+        .empty-create-btn {
+          margin-top: 10px;
+        }
+
+        /* MODAL */
+
+        .modal-overlay {
+          position: fixed;
+          inset: 0;
+          background: rgba(15, 20, 30, 0.55);
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          z-index: 9999;
+          padding: 20px;
+        }
+
+        .roadmap-modal {
+          width: 100%;
+          max-width: 560px;
+          background: white;
+          border-radius: 16px;
+          padding: 25px;
+          box-shadow:
+            0 20px 60px rgba(0, 0, 0, 0.25);
+        }
+
+        .modal-header {
+          display: flex;
+          justify-content: space-between;
+          gap: 20px;
+          margin-bottom: 25px;
+        }
+
+        .modal-header h2 {
+          margin: 0;
+          font-size: 21px;
+        }
+
+        .modal-header p {
+          margin-top: 6px;
+          color: #71809b;
+          font-size: 13px;
+          line-height: 1.5;
+        }
+
+        .close-btn {
+          border: none;
+          background: transparent;
+          color: #64748b;
+          cursor: pointer;
+          padding: 4px;
+        }
+
+        .form-group label {
+          display: block;
+          font-size: 14px;
+          font-weight: 600;
+          margin-bottom: 8px;
+        }
+
+        .form-group textarea {
+          width: 100%;
+          resize: vertical;
+          border: 1px solid #dfe3eb;
+          border-radius: 10px;
+          padding: 14px;
+          font-family: inherit;
+          font-size: 14px;
+          outline: none;
+          color: #1d2738;
+          background: #f8f9fc;
+        }
+
+        .form-group textarea:focus {
+          border-color: #5b3df5;
+          background: white;
+        }
+
+        .form-group small {
+          display: block;
+          margin-top: 7px;
+          color: #71809b;
+          font-size: 12px;
+        }
+
+        .generated-box {
+          display: flex;
+          gap: 12px;
+          margin-top: 18px;
+          padding: 15px;
+          border: 1px solid #ddd8ff;
+          background: #f8f7ff;
+          border-radius: 10px;
+          color: #5b3df5;
+        }
+
+        .generated-box strong {
+          color: #222b3d;
+          font-size: 14px;
+        }
+
+        .generated-box p {
+          margin: 4px 0 0;
+          color: #71809b;
+          font-size: 12px;
+        }
+
+        .error-box {
+          margin-top: 15px;
+          padding: 12px;
+          border-radius: 9px;
+          background: #fff1f1;
+          border: 1px solid #ffcaca;
+          color: #e53935;
+          font-size: 13px;
+          line-height: 1.5;
+          word-break: break-word;
+        }
+
+        .modal-actions {
+          display: flex;
+          justify-content: flex-end;
+          gap: 10px;
+          margin-top: 25px;
+        }
+
+        .cancel-btn {
+          border: 1px solid #dfe3eb;
+          background: white;
+          color: #344054;
+          padding: 11px 18px;
+          border-radius: 9px;
+          cursor: pointer;
+          font-weight: 600;
+        }
+
+        .cancel-btn:hover {
+          background: #f5f6f8;
+        }
+
+        .generate-btn:disabled,
+        .cancel-btn:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+
+        .spin {
+          animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+          from {
+            transform: rotate(0deg);
+          }
+
+          to {
+            transform: rotate(360deg);
+          }
+        }
+
+        @media (max-width: 900px) {
+          .roadmap-grid {
+            grid-template-columns: 1fr;
+          }
+
+          .roadmap-header {
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 15px;
+          }
+        }
+
+      `}</style>
     </div>
-
   );
 }

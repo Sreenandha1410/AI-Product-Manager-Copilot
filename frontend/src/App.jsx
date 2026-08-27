@@ -22,7 +22,7 @@ import { Analytics } from "./pages/Analytics";
 import { FeedbackExplorer } from "./pages/FeedbackExplorer";
 import { FeatureRequests } from "./pages/FeatureRequests";
 import { PRDGenerator } from "./pages/PRDGenerator";
-import { RoadmapPlanner } from "./pages/RoadmapPlanner";
+import RoadmapPlanner from "./pages/RoadmapPlanner";
 import { AIChatAssistant } from "./pages/AIChatAssistant";
 import { Settings } from "./pages/Settings";
 
