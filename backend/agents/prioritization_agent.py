@@ -11,7 +11,7 @@ The agent combines:
 2. Feature votes
 3. Product analytics
 4. Support tickets
-5. Gemini 2.5 reasoning
+5. OpenRouter LLM reasoning
 6. RICE scoring
 7. ICE scoring
 
@@ -29,20 +29,20 @@ Feature Requests
        +---- Support Tickets
        |
        v
-   Gemini 2.5
+OpenRouter / Nemotron
        |
        +---- Impact
        +---- Confidence
        +---- Effort
        |
        v
-   RICE + ICE
+RICE + ICE
        |
        v
-   Ranking
+Ranking
        |
        v
- priority_scores
+priority_scores
 """
 
 import json
@@ -52,6 +52,7 @@ from typing import Dict, List, Optional
 from sqlalchemy import func, or_
 
 from agents.base_agent import BaseAgent
+from config.openrouter import llm as openrouter_llm
 
 from models import (
     FeatureRequest,
@@ -69,13 +70,21 @@ class PrioritizationAgent(BaseAgent):
     feature requests.
 
     It analyzes each feature and calculates RICE and ICE scores.
+
+    This agent uses OpenRouter instead of Gemini.
     """
 
     def __init__(self):
 
-        super().__init__("Prioritization Agent")
+        # Use OpenRouter specifically for this agent
+        super().__init__(
+            "Prioritization Agent",
+            llm_client=openrouter_llm
+        )
 
-        self.log_info("Prioritization Agent initialized.")
+        self.log_info(
+            "Prioritization Agent initialized using OpenRouter."
+        )
 
     # =========================================================
     # 1. GET FEATURE REQUESTS
@@ -85,6 +94,7 @@ class PrioritizationAgent(BaseAgent):
         self,
         feature_id: Optional[int] = None
     ) -> List[FeatureRequest]:
+
         """
         Retrieve feature requests from PostgreSQL.
 
@@ -109,6 +119,7 @@ class PrioritizationAgent(BaseAgent):
         self,
         feature_title: str
     ) -> Optional[Analytics]:
+
         """
         Find product analytics related to a feature.
         """
@@ -123,7 +134,9 @@ class PrioritizationAgent(BaseAgent):
             .filter(
                 or_(
                     Analytics.feature.ilike(search),
-                    func.lower(Analytics.feature).contains(
+                    func.lower(
+                        Analytics.feature
+                    ).contains(
                         feature_title.lower()
                     )
                 )
@@ -139,6 +152,7 @@ class PrioritizationAgent(BaseAgent):
         self,
         feature: FeatureRequest
     ) -> List[SupportTicket]:
+
         """
         Find support tickets that appear to be related
         to the feature request.
@@ -149,7 +163,6 @@ class PrioritizationAgent(BaseAgent):
         )
 
         if not keywords:
-
             return []
 
         conditions = []
@@ -167,7 +180,9 @@ class PrioritizationAgent(BaseAgent):
 
         return (
             self.db.query(SupportTicket)
-            .filter(or_(*conditions))
+            .filter(
+                or_(*conditions)
+            )
             .all()
         )
 
@@ -179,6 +194,7 @@ class PrioritizationAgent(BaseAgent):
         self,
         text: str
     ) -> List[str]:
+
         """
         Extract useful keywords from a feature title.
         """
@@ -215,7 +231,9 @@ class PrioritizationAgent(BaseAgent):
             and len(word) > 2
         ]
 
-        return list(dict.fromkeys(keywords))
+        return list(
+            dict.fromkeys(keywords)
+        )
 
     # =========================================================
     # 5. CALCULATE REACH
@@ -227,6 +245,7 @@ class PrioritizationAgent(BaseAgent):
         analytics: Optional[Analytics],
         support_tickets: List[SupportTicket]
     ) -> int:
+
         """
         Estimate reach using available product data.
 
@@ -253,10 +272,13 @@ class PrioritizationAgent(BaseAgent):
 
             reach = 1
 
-        return max(int(reach), 1)
+        return max(
+            int(reach),
+            1
+        )
 
     # =========================================================
-    # 6. BUILD GEMINI INPUT
+    # 6. BUILD AI INPUT
     # =========================================================
 
     def build_ai_context(
@@ -268,9 +290,11 @@ class PrioritizationAgent(BaseAgent):
 
         context = {
 
-            "feature_id": feature.id,
+            "feature_id":
+                feature.id,
 
-            "feature_title": feature.title,
+            "feature_title":
+                feature.title,
 
             "feature_description":
                 feature.description,
@@ -282,19 +306,23 @@ class PrioritizationAgent(BaseAgent):
 
                 "daily_users":
                     analytics.daily_users
-                    if analytics else None,
+                    if analytics
+                    else None,
 
                 "avg_session_min":
                     analytics.avg_session_min
-                    if analytics else None,
+                    if analytics
+                    else None,
 
                 "drop_off_rate":
                     analytics.drop_off_rate
-                    if analytics else None,
+                    if analytics
+                    else None,
 
                 "satisfaction_score":
                     analytics.satisfaction_score
-                    if analytics else None
+                    if analytics
+                    else None
             },
 
             "support_tickets": {
@@ -316,104 +344,169 @@ class PrioritizationAgent(BaseAgent):
         return context
 
     # =========================================================
-    # 7. ASK GEMINI FOR IMPACT / CONFIDENCE / EFFORT
+    # 7. ASK OPENROUTER FOR IMPACT / CONFIDENCE / EFFORT
     # =========================================================
 
     def estimate_with_gemini(
         self,
         context: Dict
     ) -> Dict:
-        """
-        Ask Gemini 2.5 to estimate product impact,
-        confidence and development effort.
 
-        Gemini does NOT calculate RICE.
-        Python calculates the final score.
+        """
+        Ask the configured LLM to estimate:
+
+        - Impact
+        - Confidence
+        - Effort
+
+        The method name is kept as estimate_with_gemini()
+        so the rest of the existing architecture remains unchanged.
+
+        The actual model is now OpenRouter / Nemotron.
         """
 
         prompt = f"""
-You are a senior product manager.
+You are a senior product manager responsible for feature prioritization.
 
-Analyze the following product feature:
+Analyze the following product feature and the available evidence:
 
 {json.dumps(context, indent=2)}
 
-Estimate the following values:
+Estimate the following values.
 
 1. impact
-   Scale: 1 to 5
-   1 = very low business/customer impact
-   5 = extremely high impact
+Scale: 1 to 5
+
+1 = very low business/customer impact
+2 = low impact
+3 = moderate impact
+4 = high impact
+5 = extremely high impact
 
 2. confidence
-   Scale: 0.0 to 1.0
-   Based on the strength of the available evidence.
+Scale: 0.0 to 1.0
+
+Base confidence on the strength of the available evidence such as:
+- feature votes
+- daily users
+- support tickets
+- high priority tickets
+- drop-off rate
+- satisfaction score
 
 3. effort
-   Scale: 1 to 10
-   1 = very easy
-   10 = extremely difficult
+Scale: 1 to 10
 
-Use the available votes, users, drop-off,
-satisfaction and support-ticket information.
+1 = very easy to implement
+10 = extremely difficult to implement
 
-Return ONLY valid JSON.
+Consider the likely engineering complexity of the requested feature.
 
-Required format:
+Important rules:
+
+- Use the supplied evidence.
+- Do not invent statistics.
+- Do not invent user counts.
+- Do not invent support tickets.
+- Do not calculate RICE.
+- Do not calculate ICE.
+- Python will calculate RICE and ICE.
+- Return ONLY valid JSON.
+- Do not use Markdown.
+- Do not include additional fields.
+
+Required JSON format:
 
 {{
     "impact": 1,
     "confidence": 0.0,
     "effort": 1,
-    "reason": "short explanation"
+    "reason": "short explanation based on the available evidence"
 }}
-
-Do not include markdown.
-Do not include additional fields.
 """
 
         try:
 
             response = self.ask_llm(prompt)
 
+            # Remove accidental markdown code fences
+            response = response.strip()
+
+            if response.startswith("```"):
+                response = re.sub(
+                    r"^```(?:json)?\s*",
+                    "",
+                    response,
+                    flags=re.IGNORECASE
+                )
+
+                response = re.sub(
+                    r"\s*```$",
+                    "",
+                    response
+                )
+
+                response = response.strip()
+
             result = json.loads(response)
 
             impact = int(
-                result.get("impact", 3)
+                result.get(
+                    "impact",
+                    3
+                )
             )
 
             confidence = float(
-                result.get("confidence", 0.7)
+                result.get(
+                    "confidence",
+                    0.7
+                )
             )
 
             effort = int(
-                result.get("effort", 5)
+                result.get(
+                    "effort",
+                    5
+                )
             )
 
             # Keep values within allowed ranges.
 
             impact = max(
                 1,
-                min(5, impact)
+                min(
+                    5,
+                    impact
+                )
             )
 
             confidence = max(
                 0.0,
-                min(1.0, confidence)
+                min(
+                    1.0,
+                    confidence
+                )
             )
 
             effort = max(
                 1,
-                min(10, effort)
+                min(
+                    10,
+                    effort
+                )
             )
 
             return {
 
-                "impact": impact,
+                "impact":
+                    impact,
 
-                "confidence": confidence,
+                "confidence":
+                    confidence,
 
-                "effort": effort,
+                "effort":
+                    effort,
 
                 "reason":
                     result.get(
@@ -424,17 +517,22 @@ Do not include additional fields.
 
         except Exception as error:
 
-            self.log_error(f"Gemini estimation failed: {error}")
+            self.log_error(
+                f"LLM estimation failed: {error}"
+            )
 
             # Safe fallback values.
 
             return {
 
-                "impact": 3,
+                "impact":
+                    3,
 
-                "confidence": 0.5,
+                "confidence":
+                    0.5,
 
-                "effort": 5,
+                "effort":
+                    5,
 
                 "reason":
                     "Fallback estimation used because "
@@ -452,6 +550,7 @@ Do not include additional fields.
         confidence: float,
         effort: int
     ) -> float:
+
         """
         Calculate RICE score.
 
@@ -459,7 +558,10 @@ Do not include additional fields.
             (Reach × Impact × Confidence) / Effort
         """
 
-        effort = max(effort, 1)
+        effort = max(
+            effort,
+            1
+        )
 
         return (
             reach
@@ -477,6 +579,7 @@ Do not include additional fields.
         confidence: float,
         ease: float
     ) -> float:
+
         """
         Calculate ICE score.
 
@@ -500,6 +603,7 @@ Do not include additional fields.
         self,
         effort: int
     ) -> float:
+
         """
         Convert development effort into ease.
 
@@ -519,51 +623,63 @@ Do not include additional fields.
         self,
         feature: FeatureRequest
     ) -> Dict:
+
         """
         Perform complete prioritization analysis
         for one feature.
         """
 
+        # Get analytics
         analytics = self.get_analytics(
             feature.title
         )
 
+        # Get related support tickets
         support_tickets = (
             self.get_support_tickets(
                 feature
             )
         )
 
+        # Calculate reach
         reach = self.calculate_reach(
             feature,
             analytics,
             support_tickets
         )
 
+        # Build context for AI
         context = self.build_ai_context(
             feature,
             analytics,
             support_tickets
         )
 
+        # Get AI estimates
         ai_estimate = (
             self.estimate_with_gemini(
                 context
             )
         )
 
-        impact = ai_estimate["impact"]
+        impact = ai_estimate[
+            "impact"
+        ]
 
         confidence = ai_estimate[
             "confidence"
         ]
 
-        effort = ai_estimate["effort"]
+        effort = ai_estimate[
+            "effort"
+        ]
 
+        # Calculate ease
         ease = self.calculate_ease(
             effort
         )
 
+        # Calculate RICE
         rice_score = self.calculate_rice(
             reach=reach,
             impact=impact,
@@ -571,6 +687,7 @@ Do not include additional fields.
             effort=effort
         )
 
+        # Calculate ICE
         ice_score = self.calculate_ice(
             impact=impact,
             confidence=confidence,
@@ -633,6 +750,7 @@ Do not include additional fields.
         self,
         ranked_features: List[Dict]
     ) -> List[Dict]:
+
         """
         Assign High / Medium / Low based on
         relative RICE ranking.
@@ -642,10 +760,11 @@ Do not include additional fields.
         Bottom 25% -> Low
         """
 
-        total = len(ranked_features)
+        total = len(
+            ranked_features
+        )
 
         if total == 0:
-
             return ranked_features
 
         for index, feature in enumerate(
@@ -684,6 +803,7 @@ Do not include additional fields.
         self,
         result: Dict
     ) -> PriorityScore:
+
         """
         Save or update priority score.
         """
@@ -693,7 +813,9 @@ Do not include additional fields.
         ]
 
         existing = (
-            self.db.query(PriorityScore)
+            self.db.query(
+                PriorityScore
+            )
             .filter(
                 PriorityScore.feature_id
                 == feature_id
@@ -743,7 +865,9 @@ Do not include additional fields.
 
         self.db.commit()
 
-        self.db.refresh(record)
+        self.db.refresh(
+            record
+        )
 
         return record
 
@@ -755,6 +879,7 @@ Do not include additional fields.
         self,
         feature_id: Optional[int] = None
     ) -> Dict:
+
         """
         Main entry point.
 
@@ -767,7 +892,9 @@ Do not include additional fields.
 
         try:
 
-            self.log_info("Starting feature prioritization.")
+            self.log_info(
+                "Starting feature prioritization."
+            )
 
             features = (
                 self.get_feature_requests(
@@ -782,14 +909,17 @@ Do not include additional fields.
                     "message":
                         "No feature requests found.",
 
-                    "features": []
+                    "features":
+                        []
                 })
 
             results = []
 
             for feature in features:
 
-                self.log_info(f"Analyzing feature: {feature.title}")
+                self.log_info(
+                    f"Analyzing feature: {feature.title}"
+                )
 
                 result = (
                     self.analyze_feature(
@@ -797,31 +927,33 @@ Do not include additional fields.
                     )
                 )
 
-                results.append(result)
+                results.append(
+                    result
+                )
 
-            # Rank by RICE score.
-
+            # Rank by RICE score
             results.sort(
                 key=lambda item:
                     item["rice_score"],
                 reverse=True
             )
 
-            # Assign High / Medium / Low.
-
+            # Assign High / Medium / Low
             results = self.assign_priority(
                 results
             )
 
-            # Save to database.
-
+            # Save to database
             for result in results:
 
                 self.save_priority(
                     result
                 )
 
-            self.log_info(f"Prioritization completed for {len(results)} features.")
+            self.log_info(
+                f"Prioritization completed for "
+                f"{len(results)} features."
+            )
 
             return self.success({
 
@@ -836,7 +968,9 @@ Do not include additional fields.
 
             self.db.rollback()
 
-            self.log_error("Prioritization failed.")
+            self.log_error(
+                "Prioritization failed."
+            )
 
             return self.failure(
                 str(error)

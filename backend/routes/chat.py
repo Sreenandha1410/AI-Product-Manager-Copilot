@@ -1,19 +1,17 @@
 # backend/routes/chat.py
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from db import SessionLocal
-from models import (
-    ChatHistory,
-    Feedback,
-    Theme,
-    FeatureRequest,
-    PRDDocument,
-)
+from models import ChatHistory
 from agents.chat_agent import ChatAgent
 
+
+# ============================================================
+# ROUTER
+# ============================================================
 
 router = APIRouter(
     prefix="/chat",
@@ -21,71 +19,99 @@ router = APIRouter(
 )
 
 
+# Create one ChatAgent instance
 chat_agent = ChatAgent()
 
 
-# --------------------------------------------------
-# Request Model
-# --------------------------------------------------
+# ============================================================
+# REQUEST MODEL
+# ============================================================
 
 class ChatRequest(BaseModel):
     message: str
     workspace_id: str = "default"
 
 
-# --------------------------------------------------
+# ============================================================
 # POST /chat/
-# --------------------------------------------------
+# ============================================================
 
 @router.post("/")
 def chat(data: ChatRequest):
+
+    # Validate message
+    message = data.message.strip()
+
+    if not message:
+        raise HTTPException(
+            status_code=400,
+            detail="Message cannot be empty."
+        )
 
     db: Session = SessionLocal()
 
     try:
 
-        # ------------------------------------------
-        # Save user message
-        # ------------------------------------------
+        # ----------------------------------------------------
+        # 1. SAVE USER MESSAGE
+        # ----------------------------------------------------
 
         user_message = ChatHistory(
             workspace_id=data.workspace_id,
             role="user",
-            message=data.message,
+            message=message,
         )
 
         db.add(user_message)
         db.commit()
+        db.refresh(user_message)
 
-        # ------------------------------------------
-        # Get recent conversation history
-        # ------------------------------------------
 
-        history = (
+        # ----------------------------------------------------
+        # 2. GET RECENT CONVERSATION HISTORY
+        # ----------------------------------------------------
+
+        recent_history = (
             db.query(ChatHistory)
             .filter(
                 ChatHistory.workspace_id == data.workspace_id
             )
             .order_by(
-                ChatHistory.timestamp.asc()
+                ChatHistory.timestamp.desc()
             )
             .limit(10)
             .all()
         )
 
-        # ------------------------------------------
-        # Generate AI response
-        # ------------------------------------------
+        # Reverse so the oldest message comes first
+        # This gives the LLM a natural conversation order.
+        history = list(reversed(recent_history))
+
+
+        # ----------------------------------------------------
+        # 3. GENERATE AI RESPONSE
+        # ----------------------------------------------------
 
         ai_message = chat_agent.generate_response(
             db=db,
-            message=data.message,
+            message=message,
             history=history,
         )
 
-        # ------------------------------------------
-        # Save AI response
-        # ------------------------------------------
+
+        # Make sure response is a string
+        if ai_message is None:
+            ai_message = (
+                "I couldn't generate a response right now. "
+                "Please try again."
+            )
+
+        ai_message = str(ai_message).strip()
+
+
+        # ----------------------------------------------------
+        # 4. SAVE AI RESPONSE
+        # ----------------------------------------------------
 
         assistant_message = ChatHistory(
             workspace_id=data.workspace_id,
@@ -95,41 +121,54 @@ def chat(data: ChatRequest):
 
         db.add(assistant_message)
         db.commit()
+        db.refresh(assistant_message)
 
-        # ------------------------------------------
-        # Return response
-        # ------------------------------------------
+
+        # ----------------------------------------------------
+        # 5. RETURN RESPONSE
+        # ----------------------------------------------------
 
         return {
-            "response": ai_message
+            "response": ai_message,
+            "role": "assistant",
+            "workspace_id": data.workspace_id,
         }
+
+
+    except HTTPException:
+        db.rollback()
+        raise
+
 
     except Exception as exc:
 
         db.rollback()
 
-        print("Chat error:", exc)
+        print("Chat error:", repr(exc))
 
-        return {
-            "response": (
-                "Sorry, I couldn't process your request "
-                "right now. Please try again."
-            )
-        }
+        raise HTTPException(
+            status_code=500,
+            detail="Sorry, I couldn't process your request right now."
+        )
+
 
     finally:
+
         db.close()
 
 
-# --------------------------------------------------
+# ============================================================
 # GET /chat/history
-# --------------------------------------------------
+# ============================================================
 
 @router.get("/history")
 def get_chat_history(
     workspace_id: str = "default",
     limit: int = 50,
 ):
+
+    # Prevent unreasonable values
+    limit = max(1, min(limit, 100))
 
     db: Session = SessionLocal()
 
@@ -147,6 +186,7 @@ def get_chat_history(
             .all()
         )
 
+
         return [
             {
                 "id": item.id,
@@ -161,13 +201,25 @@ def get_chat_history(
             for item in history
         ]
 
+
+    except Exception as exc:
+
+        print("Get chat history error:", repr(exc))
+
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to load chat history."
+        )
+
+
     finally:
+
         db.close()
 
 
-# --------------------------------------------------
+# ============================================================
 # DELETE /chat/history
-# --------------------------------------------------
+# ============================================================
 
 @router.delete("/history")
 def clear_chat_history(
@@ -178,27 +230,40 @@ def clear_chat_history(
 
     try:
 
-        db.query(ChatHistory).filter(
-            ChatHistory.workspace_id == workspace_id
-        ).delete(
-            synchronize_session=False
+        deleted_count = (
+            db.query(ChatHistory)
+            .filter(
+                ChatHistory.workspace_id == workspace_id
+            )
+            .delete(
+                synchronize_session=False
+            )
         )
 
         db.commit()
 
+
         return {
-            "message": "Chat history cleared."
+            "message": "Chat history cleared.",
+            "deleted_count": deleted_count,
         }
+
 
     except Exception as exc:
 
         db.rollback()
 
-        print("Clear history error:", exc)
+        print(
+            "Clear chat history error:",
+            repr(exc)
+        )
 
-        return {
-            "message": "Failed to clear chat history."
-        }
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to clear chat history."
+        )
+
 
     finally:
+
         db.close()

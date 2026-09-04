@@ -1,22 +1,4 @@
-"""
-Clustering Agent
-
-Flow:
-
-Theme Agent
-    ↓
-Unclustered Themes
-    ↓
-SentenceTransformer Embeddings
-    ↓
-Agglomerative Clustering
-    ↓
-ONE Gemini call for all clusters
-    ↓
-FeatureCluster + FeatureRequest
-    ↓
-PostgreSQL
-"""
+# backend/agents/clustering_agent.py
 
 import json
 from typing import List, Dict
@@ -26,13 +8,18 @@ from sentence_transformers import SentenceTransformer
 from sklearn.cluster import AgglomerativeClustering
 
 from agents.base_agent import BaseAgent
+from config.openrouter import llm as openrouter_llm
 from models import Theme, FeatureCluster, FeatureRequest
 
 
 class ClusteringAgent(BaseAgent):
 
     def __init__(self):
-        super().__init__("Clustering Agent")
+        # Use OpenRouter for the AI-generated cluster information
+        super().__init__(
+            "Clustering Agent",
+            llm_client=openrouter_llm
+        )
 
         # Converts theme text into numerical vectors
         self.embedding_model = SentenceTransformer(
@@ -99,7 +86,7 @@ class ClusteringAgent(BaseAgent):
             theme_texts
         )
 
-        # Similarity 0.65
+        # Similarity = 0.65
         # Distance = 1 - similarity
         distance_threshold = (
             1 - self.similarity_threshold
@@ -130,7 +117,8 @@ class ClusteringAgent(BaseAgent):
         return list(cluster_map.values())
 
     # =========================================================
-    # 4. ONE GEMINI CALL FOR ALL CLUSTERS
+    # 4. GENERATE INFORMATION FOR ALL CLUSTERS
+    #    USING ONE OPENROUTER CALL
     # =========================================================
 
     def generate_all_cluster_information(
@@ -138,7 +126,7 @@ class ClusteringAgent(BaseAgent):
         theme_groups: List[List[Theme]]
     ) -> List[Dict]:
 
-        # Prepare clusters for Gemini
+        # Prepare clusters for OpenRouter
         clusters_for_llm = []
 
         for index, group in enumerate(
@@ -162,14 +150,14 @@ You are a senior product manager.
 Below are semantic clusters created from customer
 feedback themes.
 
-Analyze ALL clusters and return information for
-each cluster.
+Analyze ALL clusters and generate useful product
+information for each cluster.
 
 Clusters:
 
 {json.dumps(clusters_for_llm, indent=2)}
 
-Return ONLY valid JSON.
+Return ONLY a valid JSON object.
 
 Required format:
 
@@ -187,26 +175,43 @@ Required format:
 
 Rules:
 
-1. Return exactly one object for every cluster.
+1. Return exactly ONE object for every cluster.
 2. Keep the original cluster_number.
 3. Do not merge clusters.
 4. Do not invent unrelated requirements.
-5. cluster_name should contain 3-5 words.
-6. The feature request must directly solve
-   the common problem.
-7. Return JSON only.
-8. Do not use markdown.
+5. cluster_name should contain 3-5 meaningful words.
+6. The description must summarize the common customer problem
+   represented by the themes.
+7. The feature request must directly solve the common problem.
+8. feature_title should be concise and actionable.
+9. feature_description should clearly explain what the
+   proposed feature should do.
+10. Do not invent customer feedback.
+11. Base the feature request only on the provided themes.
+12. Do not create duplicate feature requests across clusters.
+13. Return JSON only.
+14. Do not use Markdown.
+15. Do not include ```json or ``` code fences.
+16. Do not include explanations before or after the JSON.
+
+The output must contain exactly these fields for every cluster:
+
+cluster_number
+cluster_name
+description
+feature_title
+feature_description
 """
 
         self.log_info(
             f"Sending {len(theme_groups)} clusters "
-            f"to Gemini in ONE request..."
+            f"to OpenRouter in ONE request..."
         )
 
         try:
 
             # =================================================
-            # ONLY ONE GEMINI API CALL
+            # ONE OPENROUTER API CALL
             # =================================================
 
             response = self.ask_llm(prompt)
@@ -254,28 +259,26 @@ Rules:
 
                 cleaned = response.strip()
 
-                # Remove markdown fences
-                if cleaned.startswith(
-                    "```json"
-                ):
+                # Remove Markdown code fences
+                if cleaned.startswith("```json"):
+
                     cleaned = cleaned[
                         len("```json"):
                     ]
 
-                elif cleaned.startswith(
-                    "```"
-                ):
+                elif cleaned.startswith("```"):
+
                     cleaned = cleaned[
                         len("```"):
                     ]
 
-                if cleaned.endswith(
-                    "```"
-                ):
+                if cleaned.endswith("```"):
+
                     cleaned = cleaned[:-3]
 
                 cleaned = cleaned.strip()
 
+                # Parse JSON
                 data = json.loads(cleaned)
 
             # -------------------------------------------------
@@ -285,7 +288,7 @@ Rules:
             if "clusters" not in data:
 
                 raise ValueError(
-                    "Gemini response does not contain "
+                    "OpenRouter response does not contain "
                     "'clusters'."
                 )
 
@@ -313,20 +316,37 @@ Rules:
 
             for item in results:
 
+                if not isinstance(item, dict):
+
+                    raise ValueError(
+                        "Each cluster must be a JSON object."
+                    )
+
                 for field in required_fields:
 
                     if field not in item:
 
                         raise ValueError(
                             f"Missing field '{field}' "
-                            f"in Gemini response."
+                            f"in OpenRouter response."
                         )
 
                 validated_results.append(item)
 
+            # Check that OpenRouter returned the same
+            # number of clusters that were created
+            if len(validated_results) != len(theme_groups):
+
+                raise ValueError(
+                    f"Expected {len(theme_groups)} cluster "
+                    f"results but received "
+                    f"{len(validated_results)}."
+                )
+
             self.log_info(
-                f"Gemini successfully generated "
-                f"information for {len(validated_results)} clusters."
+                f"OpenRouter successfully generated "
+                f"information for "
+                f"{len(validated_results)} clusters."
             )
 
             return validated_results
@@ -334,17 +354,17 @@ Rules:
         except json.JSONDecodeError as e:
 
             self.log_error(
-                f"Gemini returned invalid JSON: {e}"
+                f"OpenRouter returned invalid JSON: {e}"
             )
 
             raise RuntimeError(
-                "Gemini returned invalid JSON."
+                "OpenRouter returned invalid JSON."
             ) from e
 
         except Exception as e:
 
             self.log_error(
-                f"Gemini cluster generation failed: {e}"
+                f"OpenRouter cluster generation failed: {e}"
             )
 
             raise
@@ -401,7 +421,7 @@ Rules:
 
         for theme in themes:
 
-            # Your cluster_id column is String
+            # cluster_id column is String
             theme.cluster_id = str(
                 cluster.id
             )
@@ -515,7 +535,7 @@ Rules:
             )
 
             # -------------------------------------------------
-            # ONE GEMINI CALL
+            # ONE OPENROUTER CALL
             # -------------------------------------------------
 
             cluster_information = (
@@ -540,7 +560,7 @@ Rules:
                     f"with {len(theme_group)} themes..."
                 )
 
-                # Find Gemini information
+                # Find OpenRouter information
                 cluster_info = next(
                     (
                         item
@@ -555,7 +575,7 @@ Rules:
                 if cluster_info is None:
 
                     raise ValueError(
-                        f"No Gemini information "
+                        f"No OpenRouter information "
                         f"found for cluster {index}."
                     )
 

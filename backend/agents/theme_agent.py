@@ -1,7 +1,8 @@
-from config.gemini import llm
+from config.openrouter import llm as openrouter_llm
 from prompts.theme_prompt import theme_prompt
 from ai_schemas.theme_schema import ThemeAnalysis
 import time
+import json
 
 
 class ThemeAgent:
@@ -11,9 +12,9 @@ class ThemeAgent:
     """
 
     def __init__(self):
-        self.llm = llm.with_structured_output(ThemeAnalysis)
+        # Use OpenRouter instead of Gemini
+        self.llm = openrouter_llm
         self.prompt = theme_prompt
-        self.chain = self.prompt | self.llm
 
     def analyze_feedback(self, feedback: str) -> ThemeAnalysis:
 
@@ -21,16 +22,46 @@ class ThemeAgent:
             raise ValueError("Feedback cannot be empty.")
 
         try:
-            response = self.chain.invoke(
-                {
-                    "feedback": feedback
-                }
+            # Format the prompt
+            messages = self.prompt.format_messages(
+                feedback=feedback
             )
 
-            return response
+            # Call OpenRouter
+            response = self.llm.invoke(messages)
+
+            content = response.content
+
+            # Handle different response content formats
+            if isinstance(content, list):
+                text_parts = []
+
+                for item in content:
+                    if isinstance(item, str):
+                        text_parts.append(item)
+
+                    elif isinstance(item, dict) and "text" in item:
+                        text_parts.append(str(item["text"]))
+
+                content = "\n".join(text_parts)
+
+            content = str(content).strip()
+
+            # Remove Markdown code fences if model adds them
+            if content.startswith("```"):
+                content = content.replace("```json", "")
+                content = content.replace("```", "")
+                content = content.strip()
+
+            # Convert JSON string to Python dictionary
+            data = json.loads(content)
+
+            # Validate against ThemeAnalysis schema
+            return ThemeAnalysis.model_validate(data)
 
         except Exception as exc:
             print(f"Theme analysis failed: {exc}")
+
             raise RuntimeError(
                 f"Unable to analyze customer feedback: {exc}"
             ) from exc
@@ -79,7 +110,7 @@ class ThemeAgent:
             feedback_text = "\n".join(batch)
 
             # -------------------------------------------------
-            # Try Gemini request
+            # Try OpenRouter request
             # -------------------------------------------------
 
             try:
@@ -100,23 +131,24 @@ class ThemeAgent:
 
                 # -------------------------------------------------
                 # IMPORTANT:
-                # Do NOT retry Gemini quota errors.
+                # Do NOT retry quota errors.
                 # -------------------------------------------------
 
                 if (
                     "RESOURCE_EXHAUSTED" in error_message
                     or "429" in error_message
                     or "quota" in error_message.lower()
+                    or "rate limit" in error_message.lower()
                 ):
 
                     print(
-                        f"✗ Gemini quota exceeded while processing "
-                        f"batch {i}."
+                        f"✗ OpenRouter quota/rate limit exceeded "
+                        f"while processing batch {i}."
                     )
 
                     raise RuntimeError(
-                        "Gemini API quota exceeded. "
-                        "Please try again after the quota resets."
+                        "OpenRouter API quota or rate limit exceeded. "
+                        "Please try again later."
                     ) from exc
 
                 # -------------------------------------------------
@@ -159,21 +191,22 @@ class ThemeAgent:
 
                         retry_message = str(retry_exc)
 
-                        # Stop immediately if quota is exhausted
+                        # Stop immediately if quota/rate limit is exhausted
                         if (
                             "RESOURCE_EXHAUSTED" in retry_message
                             or "429" in retry_message
                             or "quota" in retry_message.lower()
+                            or "rate limit" in retry_message.lower()
                         ):
 
                             print(
-                                "✗ Gemini API quota exceeded. "
-                                "Stopping retries."
+                                "✗ OpenRouter API quota/rate limit "
+                                "exceeded. Stopping retries."
                             )
 
                             raise RuntimeError(
-                                "Gemini API quota exceeded. "
-                                "Please try again after the quota resets."
+                                "OpenRouter API quota or rate limit "
+                                "exceeded. Please try again later."
                             ) from retry_exc
 
                         print(

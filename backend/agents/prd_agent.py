@@ -1,4 +1,8 @@
-from config.gemini import llm
+# backend/agents/prd_agent.py
+
+import json
+
+from config.openrouter import llm as openrouter_llm
 from prompts.prd_prompt import prd_prompt
 from ai_schemas.prd_schema import PRD
 
@@ -11,19 +15,18 @@ class PRDAgent(BaseAgent):
     AI agent responsible for generating structured
     Product Requirements Documents and saving them
     to PostgreSQL.
+
+    Uses OpenRouter for PRD generation.
     """
 
     def __init__(self):
-        super().__init__("PRD Agent")
-
-        # Gemini structured output
-        self.structured_llm = llm.with_structured_output(PRD)
+        super().__init__(
+            "PRD Agent",
+            llm_client=openrouter_llm
+        )
 
         # Prompt
         self.prompt = prd_prompt
-
-        # Prompt -> Gemini -> Pydantic PRD
-        self.chain = self.prompt | self.structured_llm
 
     # =====================================================
     # GENERATE PRD
@@ -36,21 +39,169 @@ class PRDAgent(BaseAgent):
         feedback: str,
     ) -> PRD:
         """
-        Generate a structured PRD using Gemini.
+        Generate a structured PRD using OpenRouter.
 
         Returns:
             PRD Pydantic object
         """
 
-        response = self.chain.invoke(
-            {
-                "feature_name": feature_name,
-                "priority": priority,
-                "feedback": feedback,
-            }
+        if not feature_name or not feature_name.strip():
+            raise ValueError("Feature name cannot be empty.")
+
+        if not priority or not priority.strip():
+            priority = "Medium"
+
+        if not feedback:
+            feedback = ""
+
+        # -------------------------------------------------
+        # Create prompt messages
+        # -------------------------------------------------
+
+        messages = self.prompt.format_messages(
+            feature_name=feature_name,
+            priority=priority,
+            feedback=feedback,
         )
 
-        return response
+        # -------------------------------------------------
+        # Call OpenRouter
+        # -------------------------------------------------
+
+        try:
+            response = self.llm.invoke(messages)
+        except Exception as e:
+            error_message = str(e)
+
+            if "429" in error_message or "Too Many Requests" in error_message:
+                raise RuntimeError(
+                    "OpenRouter rate limit reached. Please wait a few minutes and try again."
+        )
+
+            raise RuntimeError(f"PRD generation failed: {error_message}")
+
+        # -------------------------------------------------
+        # Extract response content
+        # -------------------------------------------------
+
+        content = response.content
+
+        if isinstance(content, list):
+
+            text_parts = []
+
+            for item in content:
+
+                if isinstance(item, str):
+                    text_parts.append(item)
+
+                elif isinstance(item, dict):
+
+                    if "text" in item:
+                        text_parts.append(
+                            str(item["text"])
+                        )
+
+            content = "\n".join(text_parts)
+
+        content = str(content).strip()
+
+        # -------------------------------------------------
+        # Remove Markdown code fences
+        # -------------------------------------------------
+
+        if content.startswith("```json"):
+
+            content = content[
+                len("```json"):
+            ]
+
+        elif content.startswith("```"):
+
+            content = content[
+                len("```"):
+            ]
+
+        if content.endswith("```"):
+
+            content = content[:-3]
+
+        content = content.strip()
+
+        # -------------------------------------------------
+        # Parse JSON
+        # -------------------------------------------------
+
+        try:
+
+            data = json.loads(content)
+
+        except json.JSONDecodeError as exc:
+
+            self.log_error(
+                f"OpenRouter returned invalid JSON: {exc}"
+            )
+
+            self.log_error(
+                f"Raw response: {content}"
+            )
+
+            raise RuntimeError(
+                "OpenRouter returned invalid JSON."
+            ) from exc
+
+        # -------------------------------------------------
+        # Validate PRD using Pydantic
+        # -------------------------------------------------
+
+        try:
+
+            prd = PRD.model_validate(data)
+
+        except Exception as exc:
+
+            self.log_error(
+                f"PRD validation failed: {exc}"
+            )
+
+            raise RuntimeError(
+                f"Invalid PRD structure returned by OpenRouter: {exc}"
+            ) from exc
+
+        # -------------------------------------------------
+        # Additional validation
+        # -------------------------------------------------
+
+        if not prd.title.strip():
+            raise ValueError(
+                "Generated PRD title is empty."
+            )
+
+        if not prd.problem_statement.strip():
+            raise ValueError(
+                "Generated PRD problem statement is empty."
+            )
+
+        # Every user story must have acceptance criteria
+        for index, story in enumerate(
+            prd.user_stories,
+            start=1
+        ):
+
+            if not story.story.strip():
+
+                raise ValueError(
+                    f"User Story {index} is empty."
+                )
+
+            if not story.acceptance_criteria:
+
+                raise ValueError(
+                    f"User Story {index} has no "
+                    f"acceptance criteria."
+                )
+
+        return prd
 
     # =====================================================
     # GENERATE AND SAVE
@@ -64,7 +215,8 @@ class PRDAgent(BaseAgent):
         feature_id: int | None = None,
     ) -> dict:
         """
-        Generate a PRD using Gemini and save it to PostgreSQL.
+        Generate a PRD using OpenRouter and save it
+        to PostgreSQL.
         """
 
         try:
@@ -315,7 +467,9 @@ class PRDAgent(BaseAgent):
                 f"PRD generation failed: {str(e)}"
             )
 
-            return self.failure(str(e))
+            return self.failure(
+                str(e)
+            )
 
     # =====================================================
     # GET ALL PRDs
