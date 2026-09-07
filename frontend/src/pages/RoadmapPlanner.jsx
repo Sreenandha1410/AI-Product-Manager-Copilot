@@ -147,10 +147,14 @@ export function RoadmapPlanner() {
       setRoadmap([]);
 
       // Backend route:
-      // POST /roadmap/generate/{prd_id}
+      // POST /roadmap/generate
+      // Send the selected PRD ID in the request body.
 
       const response = await api.post(
-        `/roadmap/generate/${prdId}`
+        "/roadmap/generate",
+        {
+          prd_id: prdId,
+        }
       );
 
       const data = response.data;
@@ -169,9 +173,13 @@ export function RoadmapPlanner() {
       //   roadmap: [...]
       // }
 
+      // The backend returns saved roadmap milestones in
+      // data.items. The structured AI roadmap is available
+      // under data.roadmap.features.
       const items =
-        data?.roadmap ||
         data?.items ||
+        data?.roadmap?.features ||
+        data?.roadmap ||
         data?.data ||
         [];
 
@@ -183,14 +191,16 @@ export function RoadmapPlanner() {
 
             title:
               item?.title ||
+              item?.feature_name ||
               item?.name ||
               item?.phase ||
               `Roadmap Initiative ${index + 1}`,
 
             phase:
               item?.phase ||
+              item?.release ||
               item?.title ||
-              `Milestone ${index + 1}`,
+              `Sprint ${index + 1}`,
 
             status:
               item?.status ||
@@ -213,6 +223,18 @@ export function RoadmapPlanner() {
               item?.feature_id ||
               data?.feature_id ||
               null,
+
+            priority:
+              item?.priority || "",
+
+            milestone:
+              item?.milestone || "",
+
+            reason:
+              item?.reason || "",
+
+            dependencies:
+              item?.dependencies || [],
           }))
         : [];
 

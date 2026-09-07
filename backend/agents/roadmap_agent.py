@@ -1,102 +1,412 @@
-# backend/agents/roadmap_agent.py
-
 from config.gemini import llm
-from pydantic import BaseModel, Field
-from typing import List
+from prompts.roadmap_prompt import roadmap_prompt
+from ai_schemas.roadmap_schema import Roadmap
+from agents.base_agent import BaseAgent
 
 
-# ============================================================
-# ROADMAP SCHEMA
-# ============================================================
-
-class RoadmapMilestone(BaseModel):
-
-    title: str = Field(
-        description="Short implementation milestone name"
-    )
-
-    status: str = Field(
-        default="Planned"
-    )
-
-
-class RoadmapGeneration(BaseModel):
-
-    milestones: List[RoadmapMilestone]
-
-
-# ============================================================
-# ROADMAP AGENT
-# ============================================================
-
-class RoadmapAgent:
+class RoadmapAgent(BaseAgent):
+    """
+    AI Agent responsible for converting prioritized
+    product features into a structured product roadmap.
+    """
 
     def __init__(self):
+        super().__init__("Roadmap Agent")
 
-        self.llm = llm.with_structured_output(
-            RoadmapGeneration
-        )
+        # Force Gemini to return the Roadmap Pydantic structure
+        self.structured_llm = llm.with_structured_output(Roadmap)
 
-    def generate(
-        self,
-        title: str,
-        problem_statement: str,
-        objectives: str,
-        user_stories: str,
-        acceptance_criteria: str,
-        success_metrics: str
-    ):
+        # Connect prompt and LLM
+        self.prompt = roadmap_prompt
+        self.chain = self.prompt | self.structured_llm
 
-        prompt = f"""
-You are an expert product manager.
+    def prepare_prioritization_results(self, prioritization_result):
+        """
+        Convert Prioritization Agent output into the format
+        required by the Roadmap Agent.
+        """
 
-Generate a practical implementation roadmap
-from the following Product Requirements Document.
+        if not prioritization_result:
+            raise ValueError(
+                "Prioritization result cannot be empty."
+            )
 
-PRD TITLE:
-{title}
+        if not prioritization_result.get("success"):
+            raise ValueError(
+                "Prioritization Agent did not complete successfully."
+            )
 
-PROBLEM STATEMENT:
-{problem_statement}
+        data = prioritization_result.get("data")
 
-OBJECTIVES:
-{objectives}
+        if not data:
+            raise ValueError(
+                "Prioritization result does not contain data."
+            )
 
-USER STORIES:
-{user_stories}
+        features = data.get("features")
 
-ACCEPTANCE CRITERIA:
-{acceptance_criteria}
+        if not features:
+            raise ValueError(
+                "Prioritization result does not contain features."
+            )
 
-SUCCESS METRICS:
-{success_metrics}
+        roadmap_features = []
 
-IMPORTANT RULES:
+        for index, feature in enumerate(features, start=1):
 
-1. Generate 3 to 6 roadmap milestones.
-2. Do NOT use Q1, Q2, Q3 or Q4.
-3. Do NOT use months or dates.
-4. Each milestone should represent a meaningful
-   implementation area.
-5. Use short names.
-6. Examples:
-   - Authentication
-   - Dashboard
-   - Backend API
-   - Data Export
-   - Notifications
-   - Testing
-   - Deployment
-7. The milestones must be based on the PRD.
-8. Do not invent unrelated features.
-9. Initial status of every milestone must be "Planned".
+            if not isinstance(feature, dict):
+                raise ValueError(
+                    f"Feature {index} must be a dictionary."
+                )
 
-Return only structured roadmap milestones.
-"""
+            feature_name = (
+                feature.get("feature_title")
+                or feature.get("title")
+                or feature.get("feature_name")
+                or ""
+            )
 
-        response = self.llm.invoke(prompt)
+            description = (
+                feature.get("feature_description")
+                or feature.get("description")
+                or "No description provided."
+            )
 
-        return [
-            milestone.model_dump()
-            for milestone in response.milestones
-        ]
+            priority = feature.get("priority")
+
+            # Normalize priority if necessary
+            if isinstance(priority, str):
+                priority = priority.strip().capitalize()
+
+            dependencies = feature.get("dependencies", [])
+
+            if dependencies is None:
+                dependencies = []
+
+            if not isinstance(dependencies, list):
+                raise ValueError(
+                    f"Feature {index} dependencies must be a list."
+                )
+
+            roadmap_feature = {
+                "feature_name": feature_name,
+                "description": description,
+                "priority": priority,
+                "rice_score": feature.get("rice_score"),
+                "ice_score": feature.get("ice_score"),
+                "dependencies": dependencies,
+            }
+
+            roadmap_features.append(roadmap_feature)
+
+        return roadmap_features
+
+    def generate_roadmap(self, features):
+        """
+        Generate a structured product roadmap from
+        prioritized product features.
+
+        Args:
+            features: List of prioritized feature dictionaries.
+
+        Returns:
+            Roadmap: Structured roadmap generated by Gemini.
+
+        Raises:
+            ValueError: If features are empty or invalid.
+            RuntimeError: If roadmap generation fails.
+        """
+
+        if not features:
+            raise ValueError(
+                "Features cannot be empty."
+            )
+
+        # Required input fields
+        required_fields = {
+            "feature_name",
+            "description",
+            "priority",
+            "rice_score",
+            "ice_score",
+            "dependencies",
+        }
+
+        # Validate every feature before calling Gemini
+        for index, feature in enumerate(features, start=1):
+
+            if not isinstance(feature, dict):
+                raise ValueError(
+                    f"Feature {index} must be a dictionary."
+                )
+
+            missing_fields = required_fields - feature.keys()
+
+            if missing_fields:
+                raise ValueError(
+                    f"Feature {index} is missing required fields: "
+                    f"{sorted(missing_fields)}"
+                )
+
+            # -----------------------------
+            # Feature name validation
+            # -----------------------------
+
+            if not isinstance(feature["feature_name"], str):
+                raise ValueError(
+                    f"Feature {index} name must be a string."
+                )
+
+            if not feature["feature_name"].strip():
+                raise ValueError(
+                    f"Feature {index} name cannot be empty."
+                )
+
+            # -----------------------------
+            # Description validation
+            # -----------------------------
+
+            if not isinstance(feature["description"], str):
+                raise ValueError(
+                    f"Feature {index} description must be a string."
+                )
+
+            if not feature["description"].strip():
+                raise ValueError(
+                    f"Feature {index} description cannot be empty."
+                )
+
+            # -----------------------------
+            # Priority validation
+            # -----------------------------
+
+            priority = feature["priority"]
+
+            if isinstance(priority, str):
+                priority = priority.strip().capitalize()
+                feature["priority"] = priority
+
+            if priority not in {
+                "High",
+                "Medium",
+                "Low",
+            }:
+                raise ValueError(
+                    f"Feature {index} has invalid priority: "
+                    f"{feature['priority']}"
+                )
+
+            # -----------------------------
+            # RICE validation
+            # -----------------------------
+
+            rice_score = feature["rice_score"]
+
+            if rice_score is not None:
+
+                if isinstance(rice_score, bool) or not isinstance(
+                    rice_score,
+                    (int, float)
+                ):
+                    raise ValueError(
+                        f"Feature {index} RICE score must be numeric."
+                    )
+
+                if rice_score < 0:
+                    raise ValueError(
+                        f"Feature {index} RICE score cannot be negative."
+                    )
+
+            # -----------------------------
+            # ICE validation
+            # -----------------------------
+
+            ice_score = feature["ice_score"]
+
+            if ice_score is not None:
+
+                if isinstance(ice_score, bool) or not isinstance(
+                    ice_score,
+                    (int, float)
+                ):
+                    raise ValueError(
+                        f"Feature {index} ICE score must be numeric."
+                    )
+
+                if ice_score < 0:
+                    raise ValueError(
+                        f"Feature {index} ICE score cannot be negative."
+                    )
+
+            # -----------------------------
+            # Dependency validation
+            # -----------------------------
+
+            dependencies = feature["dependencies"]
+
+            if not isinstance(dependencies, list):
+                raise ValueError(
+                    f"Feature {index} dependencies must be a list."
+                )
+
+            for dependency in dependencies:
+
+                if not isinstance(dependency, str):
+                    raise ValueError(
+                        f"Feature {index} dependency names "
+                        f"must be strings."
+                    )
+
+        try:
+            self.log_info(
+                f"Generating roadmap for {len(features)} features."
+            )
+
+            # ----------------------------------------
+            # Send validated features to Gemini
+            # ----------------------------------------
+
+            response = self.chain.invoke(
+                {
+                    "features": features
+                }
+            )
+
+            if not response:
+                raise ValueError(
+                    "Roadmap Agent returned an empty response."
+                )
+
+            if not response.features:
+                raise ValueError(
+                    "Generated roadmap does not contain any features."
+                )
+
+            # ----------------------------------------
+            # Create dependency mapping
+            # ----------------------------------------
+
+            input_dependencies = {
+                feature["feature_name"].strip().lower():
+                feature["dependencies"]
+                for feature in features
+            }
+
+            # ----------------------------------------
+            # Create set of valid input features
+            # ----------------------------------------
+
+            input_feature_names = set(
+                input_dependencies.keys()
+            )
+
+            # ----------------------------------------
+            # Preserve dependencies and detect
+            # unresolved dependencies
+            # ----------------------------------------
+
+            for roadmap_feature in response.features:
+
+                feature_name = (
+                    roadmap_feature.feature_name
+                    .strip()
+                    .lower()
+                )
+
+                dependencies = input_dependencies.get(
+                    feature_name,
+                    []
+                )
+
+                # Preserve the dependency information
+                # supplied by the Prioritization Agent.
+                roadmap_feature.dependencies = dependencies
+
+                unresolved = []
+
+                for dependency in dependencies:
+
+                    if not isinstance(dependency, str):
+                        continue
+
+                    dependency_name = (
+                        dependency.strip().lower()
+                    )
+
+                    if dependency_name not in input_feature_names:
+                        unresolved.append(dependency)
+
+                # Store unresolved dependencies
+                roadmap_feature.unresolved_dependencies = (
+                    unresolved
+                )
+
+                # Unresolved dependencies block the feature
+                roadmap_feature.blocked_by = (
+                    unresolved.copy()
+                )
+
+                if unresolved:
+
+                    roadmap_feature.status = "Blocked"
+
+                    # Do not put blocked features
+                    # into the current sprint.
+                    roadmap_feature.release = "Future Sprint"
+
+            # ----------------------------------------
+            # Validate that every input feature appears
+            # in the generated roadmap
+            # ----------------------------------------
+
+            roadmap_feature_names = {
+                feature.feature_name
+                .strip()
+                .lower()
+                for feature in response.features
+            }
+
+            missing_features = []
+
+            for feature in features:
+
+                feature_name = (
+                    feature.get("feature_name", "")
+                    .strip()
+                    .lower()
+                )
+
+                if (
+                    feature_name
+                    and feature_name
+                    not in roadmap_feature_names
+                ):
+                    missing_features.append(
+                        feature.get("feature_name")
+                    )
+
+            if missing_features:
+
+                raise ValueError(
+                    "Roadmap is missing features: "
+                    f"{missing_features}"
+                )
+
+            self.log_info(
+                "Roadmap generated successfully."
+            )
+
+            return response
+
+        except ValueError:
+            raise
+
+        except Exception as exc:
+
+            self.log_error(
+                f"Roadmap generation failed: {str(exc)}"
+            )
+
+            raise RuntimeError(
+                "Unable to generate product roadmap."
+            ) from exc
