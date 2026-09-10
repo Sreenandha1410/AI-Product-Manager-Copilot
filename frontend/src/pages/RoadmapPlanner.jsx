@@ -1,1249 +1,339 @@
-// src/pages/RoadmapPlanner.jsx
+import React, { useEffect, useRef, useState } from "react";
 
-import React, { useEffect, useMemo, useState } from "react";
-import {
-  FileText,
-  Sparkles,
-  CheckCircle2,
-  Clock3,
-  Circle,
-  Loader2,
-  RefreshCw,
-  ArrowRight,
-  Target,
-  ListChecks,
-  AlertCircle,
-  ChevronRight,
-  CalendarDays,
-} from "lucide-react";
+const API_BASE = "http://localhost:8000";
 
-import api from "../services/api";
-
-export function RoadmapPlanner() {
-  // ============================================================
-  // STATE
-  // ============================================================
-
+export default function RoadmapPlanner() {
   const [prds, setPrds] = useState([]);
   const [selectedPRD, setSelectedPRD] = useState(null);
-  const [roadmap, setRoadmap] = useState([]);
 
+  const [roadmap, setRoadmap] = useState(null);
   const [loadingPRDs, setLoadingPRDs] = useState(true);
-  const [generatingRoadmap, setGeneratingRoadmap] = useState(false);
+  const [generating, setGenerating] = useState(false);
 
   const [error, setError] = useState("");
-  const [search, setSearch] = useState("");
+  const [expandedFeature, setExpandedFeature] = useState(null);
 
-  // ============================================================
-  // LOAD GENERATED PRDs
-  // ============================================================
+  const selectedRef = useRef(null);
+  const roadmapRef = useRef(null);
 
-  const fetchPRDs = async () => {
+  useEffect(() => {
+    loadPRDs();
+  }, []);
+
+  async function loadPRDs() {
     try {
       setLoadingPRDs(true);
       setError("");
 
-      const response = await api.get("/prd/");
+      const response = await fetch(`${API_BASE}/prd/`);
 
-      const data = Array.isArray(response.data)
-        ? response.data
-        : response.data?.items ||
-          response.data?.prds ||
-          response.data?.data ||
-          [];
+      if (!response.ok) {
+        throw new Error("Unable to load generated PRDs.");
+      }
 
-      setPrds(data);
+      const data = await response.json();
+
+      let items = [];
+
+      if (Array.isArray(data)) {
+        items = data;
+      } else if (Array.isArray(data.prds)) {
+        items = data.prds;
+      } else if (Array.isArray(data.data)) {
+        items = data.data;
+      }
+
+      setPrds(items);
     } catch (err) {
-      console.error("PRD loading error:", err);
-
-      setError(
-        err?.response?.data?.detail ||
-          err?.message ||
-          "Unable to load generated PRDs."
-      );
+      console.error(err);
+      setError(err.message || "Failed to load PRDs.");
     } finally {
       setLoadingPRDs(false);
     }
-  };
+  }
 
-  useEffect(() => {
-    fetchPRDs();
-  }, []);
+  function normalizePRD(prd) {
+    return {
+      id: prd.id ?? prd.prd_id ?? prd.document_id,
 
-  // ============================================================
-  // FILTER PRDs
-  // ============================================================
+      title:
+        prd.title ||
+        prd.feature_name ||
+        "Untitled Product Requirement",
 
-  const filteredPRDs = useMemo(() => {
-    const query = search.trim().toLowerCase();
+      problem_statement:
+        prd.problem_statement ||
+        "No problem statement available.",
 
-    if (!query) {
-      return prds;
-    }
+      objectives:
+        prd.objectives ||
+        "No objectives available.",
 
-    return prds.filter((prd) => {
-      const title = String(
-        prd?.title ||
-          prd?.feature_name ||
-          prd?.name ||
-          ""
-      ).toLowerCase();
+      user_stories:
+        prd.user_stories ||
+        "",
 
-      const problem = String(
-        prd?.problem_statement || ""
-      ).toLowerCase();
+      acceptance_criteria:
+        prd.acceptance_criteria ||
+        "",
 
-      return (
-        title.includes(query) ||
-        problem.includes(query)
-      );
-    });
-  }, [prds, search]);
+      success_metrics:
+        prd.success_metrics ||
+        "",
 
-  // ============================================================
-  // SELECT PRD
-  // ============================================================
+      created_at:
+        prd.created_at ||
+        "",
+    };
+  }
 
-  const handleSelectPRD = (prd) => {
-    setSelectedPRD(prd);
-    setRoadmap([]);
+  async function selectPRD(prd) {
+    const normalized = normalizePRD(prd);
+
+    setSelectedPRD(normalized);
+    setRoadmap(null);
     setError("");
-  };
 
-  // ============================================================
-  // GET PRD ID
-  // ============================================================
+    /*
+      Move immediately to the selected PRD section.
+    */
+    setTimeout(() => {
+      selectedRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    }, 100);
 
-  const getPRDId = (prd) => {
-    return (
-      prd?.id ||
-      prd?.document_id ||
-      prd?.prd_id
-    );
-  };
+    /*
+      Automatically generate the roadmap.
+    */
+    await generateRoadmap(normalized);
+  }
 
-  // ============================================================
-  // GENERATE ROADMAP FROM SELECTED PRD
-  // ============================================================
-
-  const handleGenerateRoadmap = async () => {
-    if (!selectedPRD) {
-      setError("Please select a generated PRD first.");
-      return;
-    }
-
-    const prdId = getPRDId(selectedPRD);
-
-    if (!prdId) {
-      setError(
-        "The selected PRD does not have a valid PRD ID."
-      );
+  async function generateRoadmap(prd = selectedPRD) {
+    if (!prd?.id) {
+      setError("Invalid PRD selected.");
       return;
     }
 
     try {
-      setGeneratingRoadmap(true);
+      setGenerating(true);
       setError("");
-      setRoadmap([]);
+      setRoadmap(null);
 
-      // Backend route:
-      // POST /roadmap/generate
-      // Send the selected PRD ID in the request body.
+      const response = await fetch(`${API_BASE}/roadmap/generate`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          prd_id: prd.id,
+        }),
+      });
 
-      const response = await api.post(
-        "/roadmap/generate",
-        {
-          prd_id: prdId,
-        }
-      );
+      const data = await response.json();
 
-      const data = response.data;
+      if (!response.ok) {
+        throw new Error(
+          data.detail ||
+          data.message ||
+          "Roadmap generation failed."
+        );
+      }
 
-      console.log(
-        "Roadmap generation response:",
-        data
-      );
+      const roadmapData =
+        data.data ||
+        data.roadmap ||
+        data;
 
-      // Backend returns:
-      // {
-      //   status: "success",
-      //   prd_id: ...,
-      //   feature_id: ...,
-      //   feature: ...,
-      //   roadmap: [...]
-      // }
-
-      // The backend returns saved roadmap milestones in
-      // data.items. The structured AI roadmap is available
-      // under data.roadmap.features.
-      const items =
-        data?.items ||
-        data?.roadmap?.features ||
-        data?.roadmap ||
-        data?.data ||
+      const features =
+        roadmapData.features ||
+        roadmapData.items ||
         [];
 
-      const normalizedRoadmap = Array.isArray(items)
-        ? items.map((item, index) => ({
-            id:
-              item?.id ||
-              `${prdId}-${index + 1}`,
+      const normalizedRoadmap = {
+        roadmap_name:
+          roadmapData.roadmap_name ||
+          roadmapData.title ||
+          `${prd.title} Execution Plan`,
 
-            title:
-              item?.title ||
-              item?.feature_name ||
-              item?.name ||
-              item?.phase ||
-              `Roadmap Initiative ${index + 1}`,
+        timeline:
+          roadmapData.timeline ||
+          "Sprint-based execution",
 
-            phase:
-              item?.phase ||
-              item?.release ||
-              item?.title ||
-              `Sprint ${index + 1}`,
+        features: features.map((feature, index) => ({
+          id: index + 1,
 
-            status:
-              item?.status ||
-              "Planned",
+          feature_name:
+            feature.feature_name ||
+            feature.title ||
+            `Feature ${index + 1}`,
 
-            progress:
-              typeof item?.progress === "number"
-                ? item.progress
-                : getProgressFromStatus(
-                    item?.status
-                  ),
+          description:
+            feature.description ||
+            "No description available.",
 
-            start_date:
-              item?.start_date || "",
+          priority:
+            feature.priority ||
+            "Medium",
 
-            end_date:
-              item?.end_date || "",
+          rice_score:
+            feature.rice_score ?? null,
 
-            feature_id:
-              item?.feature_id ||
-              data?.feature_id ||
-              null,
+          ice_score:
+            feature.ice_score ?? null,
 
-            priority:
-              item?.priority || "",
+          release:
+            feature.release ||
+            feature.sprint ||
+            `Sprint ${index + 1}`,
 
-            milestone:
-              item?.milestone || "",
+          milestone:
+            feature.milestone ||
+            "Product Development",
 
-            reason:
-              item?.reason || "",
+          status:
+            feature.status ||
+            "Planned",
 
-            dependencies:
-              item?.dependencies || [],
-          }))
-        : [];
+          progress:
+            typeof feature.progress === "number"
+              ? feature.progress
+              : getProgress(feature.status),
+
+          dependencies:
+            Array.isArray(feature.dependencies)
+              ? feature.dependencies
+              : [],
+
+          unresolved_dependencies:
+            Array.isArray(feature.unresolved_dependencies)
+              ? feature.unresolved_dependencies
+              : [],
+
+          blocked_by:
+            Array.isArray(feature.blocked_by)
+              ? feature.blocked_by
+              : [],
+
+          blocker:
+            feature.blocker ||
+            "",
+
+          resolution_steps:
+            Array.isArray(feature.resolution_steps)
+              ? feature.resolution_steps
+              : [],
+
+          next_action:
+            feature.next_action ||
+            "Begin implementation.",
+
+          reason:
+            feature.reason ||
+            "Scheduled based on product priority.",
+        })),
+      };
 
       setRoadmap(normalizedRoadmap);
 
-      if (normalizedRoadmap.length === 0) {
-        setError(
-          "Roadmap generation completed, but no milestones were returned."
-        );
-      }
+      /*
+        Once roadmap is generated,
+        automatically move to the execution plan.
+      */
+      setTimeout(() => {
+        roadmapRef.current?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      }, 300);
+
     } catch (err) {
-      console.error(
-        "Roadmap generation error:",
-        err
-      );
+      console.error("Roadmap generation error:", err);
 
       setError(
-        err?.response?.data?.detail ||
-          err?.message ||
-          "Failed to generate roadmap."
+        err.message ||
+        "Something went wrong while generating the roadmap."
       );
     } finally {
-      setGeneratingRoadmap(false);
+      setGenerating(false);
     }
-  };
-
-  // ============================================================
-  // PROGRESS FROM STATUS
-  // ============================================================
-
-  function getProgressFromStatus(status) {
-    const value = String(
-      status || "Planned"
-    ).toLowerCase();
-
-    if (value === "completed") {
-      return 100;
-    }
-
-    if (
-      value === "in progress" ||
-      value === "in-progress"
-    ) {
-      return 50;
-    }
-
-    if (value === "blocked") {
-      return 25;
-    }
-
-    return 0;
   }
 
-  // ============================================================
-  // STATUS ICON
-  // ============================================================
+  function getProgress(status) {
+    switch (status) {
+      case "Completed":
+        return 100;
 
-  const StatusIcon = ({ status }) => {
-    const value = String(
-      status || ""
-    ).toLowerCase();
+      case "In Progress":
+        return 60;
 
-    if (value === "completed") {
-      return (
-        <CheckCircle2
-          size={17}
-          strokeWidth={2}
-        />
-      );
+      case "Blocked":
+        return 0;
+
+      default:
+        return 0;
     }
+  }
 
-    if (
-      value === "in progress" ||
-      value === "in-progress"
-    ) {
-      return (
-        <Clock3
-          size={17}
-          strokeWidth={2}
-        />
-      );
-    }
-
-    return (
-      <Circle
-        size={17}
-        strokeWidth={2}
-      />
+  function toggleFeature(index) {
+    setExpandedFeature(
+      expandedFeature === index ? null : index
     );
-  };
+  }
 
-  // ============================================================
-  // STATUS CLASS
-  // ============================================================
+  function getPriorityClass(priority) {
+    if (priority === "High") return "priority-high";
+    if (priority === "Medium") return "priority-medium";
+    return "priority-low";
+  }
 
-  const getStatusClass = (status) => {
-    const value = String(
-      status || "Planned"
-    ).toLowerCase();
+  function getStatusClass(status) {
+    if (status === "Blocked") return "status-blocked";
+    if (status === "Completed") return "status-completed";
+    if (status === "In Progress") return "status-progress";
+    return "status-planned";
+  }
 
-    if (value === "completed") {
-      return "status completed";
-    }
-
-    if (
-      value === "in progress" ||
-      value === "in-progress"
-    ) {
-      return "status progress";
-    }
-
-    if (value === "blocked") {
-      return "status blocked";
-    }
-
-    return "status planned";
-  };
-
-  // ============================================================
-  // FORMAT DATE
-  // ============================================================
-
-  const formatDate = (value) => {
+  function formatDate(value) {
     if (!value) return "";
 
     try {
-      return new Date(value).toLocaleDateString(
-        "en-IN",
-        {
-          day: "2-digit",
-          month: "short",
-          year: "numeric",
-        }
-      );
+      return new Date(value).toLocaleDateString();
     } catch {
       return value;
     }
-  };
+  }
 
-  // ============================================================
-  // SAFE ARRAY
-  // ============================================================
+  const totalFeatures = roadmap?.features?.length || 0;
 
-  const toArray = (value) => {
-    if (Array.isArray(value)) {
-      return value;
-    }
+  const highPriority =
+    roadmap?.features?.filter(
+      (item) => item.priority === "High"
+    ).length || 0;
 
-    if (value === null || value === undefined) {
-      return [];
-    }
+  const blocked =
+    roadmap?.features?.filter(
+      (item) => item.status === "Blocked"
+    ).length || 0;
 
-    if (typeof value === "string") {
-      if (!value.trim()) return [];
+  const inProgress =
+    roadmap?.features?.filter(
+      (item) => item.status === "In Progress"
+    ).length || 0;
 
-      return value
-        .split("\n")
-        .map((item) =>
-          item
-            .replace(/^\s*[-*•]\s*/, "")
-            .replace(/^\s*\d+[\.\)]\s*/, "")
-            .trim()
-        )
-        .filter(Boolean);
-    }
+  const planned =
+    roadmap?.features?.filter(
+      (item) => item.status === "Planned"
+    ).length || 0;
 
-    return [String(value)];
-  };
-
-  // ============================================================
-  // PRD CONTENT
-  // ============================================================
-
-  const getObjectives = (prd) => {
-    return toArray(
-      prd?.objectives ||
-        prd?.objective ||
-        []
-    );
-  };
-
-  const getUserStories = (prd) => {
-    const stories =
-      prd?.user_stories ||
-      prd?.userStories ||
-      [];
-
-    if (Array.isArray(stories)) {
-      return stories.map((story) => {
-        if (typeof story === "string") {
-          return {
-            story,
-            acceptance_criteria: [],
-          };
-        }
-
-        return {
-          story:
-            story?.story ||
-            story?.user_story ||
-            story?.userStory ||
-            "",
-
-          acceptance_criteria:
-            toArray(
-              story?.acceptance_criteria ||
-                story?.acceptanceCriteria ||
-                []
-            ),
-        };
-      });
-    }
-
-    return [];
-  };
-
-  // ============================================================
-  // MAIN UI
-  // ============================================================
+  const completed =
+    roadmap?.features?.filter(
+      (item) => item.status === "Completed"
+    ).length || 0;
 
   return (
     <div className="roadmap-page">
-
-      {/* ======================================================
-          HEADER
-      ====================================================== */}
-
-      <div className="roadmap-header">
-
-        <div className="header-left">
-
-          <div className="header-icon">
-            <Target size={24} />
-          </div>
-
-          <div>
-            <h1>Roadmap Planner</h1>
-
-            <p>
-              Select a generated PRD and turn its
-              requirements into an actionable product
-              roadmap.
-            </p>
-          </div>
-
-        </div>
-
-        <button
-          className="refresh-btn"
-          onClick={fetchPRDs}
-          disabled={loadingPRDs}
-        >
-          <RefreshCw
-            size={17}
-            className={
-              loadingPRDs
-                ? "spin"
-                : ""
-            }
-          />
-
-          Refresh PRDs
-        </button>
-
-      </div>
-
-      {/* ======================================================
-          ERROR
-      ====================================================== */}
-
-      {error && (
-        <div className="error-banner">
-
-          <AlertCircle size={20} />
-
-          <div>
-            <strong>
-              Something went wrong
-            </strong>
-
-            <p>{error}</p>
-          </div>
-
-        </div>
-      )}
-
-      {/* ======================================================
-          SEARCH
-      ====================================================== */}
-
-      <div className="toolbar">
-
-        <div className="search-box">
-
-          <FileText size={18} />
-
-          <input
-            type="text"
-            placeholder="Search generated PRDs..."
-            value={search}
-            onChange={(e) =>
-              setSearch(e.target.value)
-            }
-          />
-
-        </div>
-
-        <div className="prd-count">
-          {filteredPRDs.length} PRD
-          {filteredPRDs.length !== 1
-            ? "s"
-            : ""}
-        </div>
-
-      </div>
-
-      {/* ======================================================
-          MAIN CONTENT
-      ====================================================== */}
-
-      <div className="planner-layout">
-
-        {/* ====================================================
-            LEFT — GENERATED PRDs
-        ==================================================== */}
-
-        <section className="prd-panel">
-
-          <div className="panel-header">
-
-            <div>
-              <h2>Generated PRDs</h2>
-
-              <p>
-                Select a PRD to create its roadmap.
-              </p>
-            </div>
-
-            <span className="count-badge">
-              {prds.length}
-            </span>
-
-          </div>
-
-          <div className="prd-list">
-
-            {loadingPRDs ? (
-              <div className="loading-state">
-
-                <Loader2
-                  size={28}
-                  className="spin"
-                />
-
-                <p>
-                  Loading generated PRDs...
-                </p>
-
-              </div>
-            ) : filteredPRDs.length === 0 ? (
-              <div className="empty-prd">
-
-                <div className="empty-icon">
-                  <FileText size={30} />
-                </div>
-
-                <h3>
-                  No PRDs available
-                </h3>
-
-                <p>
-                  Generate a PRD from the PRD
-                  Generator first. Your generated
-                  PRDs will appear here.
-                </p>
-
-              </div>
-            ) : (
-              filteredPRDs.map((prd) => {
-
-                const id = getPRDId(prd);
-
-                const isSelected =
-                  getPRDId(selectedPRD) === id;
-
-                const title =
-                  prd?.title ||
-                  prd?.feature_name ||
-                  prd?.name ||
-                  "Untitled PRD";
-
-                return (
-                  <button
-                    key={id}
-                    className={`prd-card ${
-                      isSelected
-                        ? "selected"
-                        : ""
-                    }`}
-                    onClick={() =>
-                      handleSelectPRD(prd)
-                    }
-                  >
-
-                    <div className="prd-card-top">
-
-                      <div className="prd-card-icon">
-                        <FileText
-                          size={20}
-                        />
-                      </div>
-
-                      <div className="prd-card-title">
-
-                        <h3>
-                          {title}
-                        </h3>
-
-                        <span>
-                          PRD #{id}
-                        </span>
-
-                      </div>
-
-                      <ChevronRight
-                        size={19}
-                        className="prd-arrow"
-                      />
-
-                    </div>
-
-                    <p className="prd-preview">
-                      {prd?.problem_statement ||
-                        "Product Requirements Document generated by AI."}
-                    </p>
-
-                    <div className="prd-card-footer">
-
-                      <span>
-                        <Sparkles
-                          size={13}
-                        />
-
-                        AI Generated
-                      </span>
-
-                      {prd?.created_at && (
-                        <span>
-                          {formatDate(
-                            prd.created_at
-                          )}
-                        </span>
-                      )}
-
-                    </div>
-
-                  </button>
-                );
-              })
-            )}
-
-          </div>
-
-        </section>
-
-        {/* ====================================================
-            RIGHT — PRD DETAILS + ROADMAP
-        ==================================================== */}
-
-        <section className="content-panel">
-
-          {!selectedPRD ? (
-
-            /* ==================================================
-               NO PRD SELECTED
-            ================================================== */
-
-            <div className="select-prd-state">
-
-              <div className="select-icon">
-                <Target size={42} />
-              </div>
-
-              <h2>
-                Select a generated PRD
-              </h2>
-
-              <p>
-                Choose a PRD from the left to review
-                its requirements and generate a
-                roadmap specifically for that PRD.
-              </p>
-
-              <div className="steps">
-
-                <div className="step">
-                  <span>1</span>
-                  Select PRD
-                </div>
-
-                <ArrowRight
-                  size={18}
-                />
-
-                <div className="step">
-                  <span>2</span>
-                  Generate
-                </div>
-
-                <ArrowRight
-                  size={18}
-                />
-
-                <div className="step">
-                  <span>3</span>
-                  View Roadmap
-                </div>
-
-              </div>
-
-            </div>
-
-          ) : (
-
-            /* ==================================================
-               SELECTED PRD
-            ================================================== */
-
-            <div className="selected-content">
-
-              {/* ----------------------------------------------
-                  PRD HEADER
-              ---------------------------------------------- */}
-
-              <div className="selected-prd-header">
-
-                <div>
-
-                  <div className="selected-label">
-                    <FileText
-                      size={16}
-                    />
-
-                    Selected PRD
-                  </div>
-
-                  <h2>
-                    {selectedPRD?.title ||
-                      selectedPRD?.feature_name ||
-                      "Untitled PRD"}
-                  </h2>
-
-                  <p>
-                    {selectedPRD?.problem_statement ||
-                      "Review the generated requirements before creating the roadmap."}
-                  </p>
-
-                </div>
-
-                <button
-                  className="generate-roadmap-btn"
-                  onClick={
-                    handleGenerateRoadmap
-                  }
-                  disabled={
-                    generatingRoadmap
-                  }
-                >
-
-                  {generatingRoadmap ? (
-                    <>
-                      <Loader2
-                        size={18}
-                        className="spin"
-                      />
-
-                      Generating...
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles
-                        size={18}
-                      />
-
-                      Generate Roadmap
-                    </>
-                  )}
-
-                </button>
-
-              </div>
-
-              {/* ----------------------------------------------
-                  PRD SUMMARY
-              ---------------------------------------------- */}
-
-              <div className="prd-summary-grid">
-
-                <div className="summary-card">
-
-                  <div className="summary-icon">
-                    <Target size={18} />
-                  </div>
-
-                  <div>
-                    <span>
-                      Priority
-                    </span>
-
-                    <strong>
-                      {selectedPRD?.priority ||
-                        selectedPRD?.impact_level ||
-                        "Medium"}
-                    </strong>
-                  </div>
-
-                </div>
-
-                <div className="summary-card">
-
-                  <div className="summary-icon">
-                    <ListChecks
-                      size={18}
-                    />
-                  </div>
-
-                  <div>
-                    <span>
-                      Objectives
-                    </span>
-
-                    <strong>
-                      {getObjectives(
-                        selectedPRD
-                      ).length}
-                    </strong>
-                  </div>
-
-                </div>
-
-                <div className="summary-card">
-
-                  <div className="summary-icon">
-                    <FileText size={18} />
-                  </div>
-
-                  <div>
-                    <span>
-                      User Stories
-                    </span>
-
-                    <strong>
-                      {
-                        getUserStories(
-                          selectedPRD
-                        ).length
-                      }
-                    </strong>
-                  </div>
-
-                </div>
-
-              </div>
-
-              {/* ----------------------------------------------
-                  PRD DETAILS
-              ---------------------------------------------- */}
-
-              <div className="prd-details">
-
-                <div className="detail-section">
-
-                  <div className="detail-heading">
-                    <Target size={17} />
-
-                    <h3>
-                      Objectives
-                    </h3>
-                  </div>
-
-                  {getObjectives(
-                    selectedPRD
-                  ).length > 0 ? (
-
-                    <ul>
-                      {getObjectives(
-                        selectedPRD
-                      ).map(
-                        (objective, index) => (
-                          <li
-                            key={index}
-                          >
-                            {objective}
-                          </li>
-                        )
-                      )}
-                    </ul>
-
-                  ) : (
-                    <p className="muted">
-                      No objectives available.
-                    </p>
-                  )}
-
-                </div>
-
-                <div className="detail-section">
-
-                  <div className="detail-heading">
-                    <ListChecks
-                      size={17}
-                    />
-
-                    <h3>
-                      User Stories
-                    </h3>
-                  </div>
-
-                  {getUserStories(
-                    selectedPRD
-                  ).length > 0 ? (
-
-                    <div className="stories-list">
-
-                      {getUserStories(
-                        selectedPRD
-                      )
-                        .slice(0, 4)
-                        .map(
-                          (
-                            story,
-                            index
-                          ) => (
-                            <div
-                              className="story-item"
-                              key={index}
-                            >
-
-                              <span className="story-number">
-                                {index + 1}
-                              </span>
-
-                              <div>
-                                <p>
-                                  {
-                                    story.story
-                                  }
-                                </p>
-
-                                {story
-                                  .acceptance_criteria
-                                  ?.length >
-                                  0 && (
-                                  <span className="criteria-count">
-                                    {
-                                      story
-                                        .acceptance_criteria
-                                        .length
-                                    }{" "}
-                                    acceptance
-                                    criteria
-                                  </span>
-                                )}
-                              </div>
-
-                            </div>
-                          )
-                        )}
-
-                    </div>
-
-                  ) : (
-                    <p className="muted">
-                      User stories are stored
-                      as generated PRD content.
-                    </p>
-                  )}
-
-                </div>
-
-              </div>
-
-              {/* ----------------------------------------------
-                  ROADMAP
-              ---------------------------------------------- */}
-
-              <div className="roadmap-output">
-
-                <div className="roadmap-output-header">
-
-                  <div>
-
-                    <div className="roadmap-title-row">
-
-                      <div className="roadmap-title-icon">
-                        <Target
-                          size={19}
-                        />
-                      </div>
-
-                      <h2>
-                        Product Roadmap
-                      </h2>
-
-                    </div>
-
-                    <p>
-                      Implementation milestones
-                      generated from this PRD.
-                    </p>
-
-                  </div>
-
-                  {roadmap.length > 0 && (
-                    <span className="milestone-count">
-                      {roadmap.length} milestone
-                      {roadmap.length !== 1
-                        ? "s"
-                        : ""}
-                    </span>
-                  )}
-
-                </div>
-
-                {roadmap.length === 0 ? (
-
-                  <div className="roadmap-empty">
-
-                    <div className="roadmap-empty-icon">
-                      <Sparkles size={28} />
-                    </div>
-
-                    <h3>
-                      Roadmap not generated yet
-                    </h3>
-
-                    <p>
-                      Click{" "}
-                      <strong>
-                        Generate Roadmap
-                      </strong>{" "}
-                      to create implementation
-                      milestones from this PRD.
-                    </p>
-
-                  </div>
-
-                ) : (
-
-                  <div className="timeline">
-
-                    {roadmap.map(
-                      (item, index) => (
-
-                        <div
-                          className="timeline-item"
-                          key={item.id}
-                        >
-
-                          {/* timeline line */}
-
-                          {index <
-                            roadmap.length -
-                              1 && (
-                            <div className="timeline-line" />
-                          )}
-
-                          {/* timeline dot */}
-
-                          <div
-                            className={`timeline-dot ${
-                              item.status
-                                ?.toLowerCase()
-                                .replace(
-                                  " ",
-                                  "-"
-                                )
-                            }`}
-                          >
-                            <StatusIcon
-                              status={
-                                item.status
-                              }
-                            />
-                          </div>
-
-                          {/* milestone card */}
-
-                          <div className="milestone-card">
-
-                            <div className="milestone-top">
-
-                              <div>
-
-                                <span className="milestone-number">
-                                  MILESTONE{" "}
-                                  {index + 1}
-                                </span>
-
-                                <h3>
-                                  {
-                                    item.title
-                                  }
-                                </h3>
-
-                              </div>
-
-                              <span
-                                className={getStatusClass(
-                                  item.status
-                                )}
-                              >
-                                <StatusIcon
-                                  status={
-                                    item.status
-                                  }
-                                />
-
-                                {item.status}
-                              </span>
-
-                            </div>
-
-                            <div className="milestone-meta">
-
-                              <div className="progress-wrapper">
-
-                                <div className="progress-label">
-
-                                  <span>
-                                    Progress
-                                  </span>
-
-                                  <strong>
-                                    {
-                                      item.progress
-                                    }
-                                    %
-                                  </strong>
-
-                                </div>
-
-                                <div className="progress-track">
-
-                                  <div
-                                    className="progress-fill"
-                                    style={{
-                                      width: `${Math.min(
-                                        Math.max(
-                                          item.progress ||
-                                            0,
-                                          0
-                                        ),
-                                        100
-                                      )}%`,
-                                    }}
-                                  />
-
-                                </div>
-
-                              </div>
-
-                              {(item.start_date ||
-                                item.end_date) && (
-                                <div className="date-range">
-
-                                  <CalendarDays
-                                    size={15}
-                                  />
-
-                                  <span>
-                                    {formatDate(
-                                      item.start_date
-                                    )}
-
-                                    {item.end_date &&
-                                      " → "}
-
-                                    {formatDate(
-                                      item.end_date
-                                    )}
-                                  </span>
-
-                                </div>
-                              )}
-
-                            </div>
-
-                          </div>
-
-                        </div>
-                      )
-                    )}
-
-                  </div>
-                )}
-
-              </div>
-
-            </div>
-          )}
-
-        </section>
-
-      </div>
-
-      {/* ======================================================
-          STYLES
-      ====================================================== */}
 
       <style>{`
 
@@ -1252,1029 +342,1066 @@ export function RoadmapPlanner() {
         }
 
         .roadmap-page {
-          min-height: calc(100vh - 70px);
-          padding: 30px 34px 50px;
+          padding: 34px 42px 70px;
           background: #f7f8fc;
+          min-height: 100vh;
           color: #172033;
         }
 
-        /* =====================================================
-           HEADER
-        ===================================================== */
-
-        .roadmap-header {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 25px;
-          margin-bottom: 24px;
+        .roadmap-container {
+          max-width: 1250px;
+          margin: auto;
         }
 
-        .header-left {
-          display: flex;
-          align-items: center;
-          gap: 15px;
+        .page-header {
+          margin-bottom: 28px;
         }
 
-        .header-icon {
-          width: 50px;
-          height: 50px;
-          border-radius: 14px;
-          background: #eeeaff;
-          color: #5b3df5;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          flex-shrink: 0;
-        }
-
-        .roadmap-header h1 {
+        .page-header h1 {
           margin: 0;
-          font-size: 28px;
+          font-size: 32px;
           font-weight: 750;
           letter-spacing: -0.5px;
         }
 
-        .roadmap-header p {
-          margin: 5px 0 0;
-          color: #71809b;
-          font-size: 14px;
+        .page-header p {
+          margin: 9px 0 0;
+          color: #69758a;
+          font-size: 15px;
         }
 
-        .refresh-btn {
-          height: 42px;
-          padding: 0 16px;
-          border: 1px solid #dfe3ec;
+        .section {
           background: white;
-          border-radius: 9px;
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          color: #344054;
-          font-weight: 600;
-          cursor: pointer;
+          border: 1px solid #e4e7ef;
+          border-radius: 18px;
+          padding: 26px;
+          margin-bottom: 25px;
+          box-shadow: 0 5px 18px rgba(30, 40, 70, 0.035);
         }
 
-        .refresh-btn:hover {
-          border-color: #cfc8ff;
-          color: #5b3df5;
+        .section-title {
+          font-size: 21px;
+          font-weight: 700;
+          margin-bottom: 6px;
         }
 
-        .refresh-btn:disabled {
-          opacity: 0.6;
-          cursor: not-allowed;
-        }
-
-        /* =====================================================
-           ERROR
-        ===================================================== */
-
-        .error-banner {
-          display: flex;
-          align-items: flex-start;
-          gap: 12px;
-          padding: 15px 17px;
-          margin-bottom: 20px;
-          border: 1px solid #ffcaca;
-          background: #fff2f2;
-          color: #d92d20;
-          border-radius: 11px;
-        }
-
-        .error-banner strong {
-          display: block;
+        .section-subtitle {
+          color: #718096;
           font-size: 14px;
+          margin-bottom: 22px;
         }
 
-        .error-banner p {
-          margin: 3px 0 0;
-          font-size: 13px;
-          line-height: 1.5;
-          word-break: break-word;
-        }
-
-        /* =====================================================
-           TOOLBAR
-        ===================================================== */
-
-        .toolbar {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 18px;
-        }
-
-        .search-box {
-          width: 390px;
-          height: 44px;
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          padding: 0 14px;
-          background: white;
-          border: 1px solid #dfe3ec;
-          border-radius: 10px;
-          color: #7a8498;
-        }
-
-        .search-box:focus-within {
-          border-color: #7258ff;
-          box-shadow: 0 0 0 3px rgba(91, 61, 245, 0.08);
-        }
-
-        .search-box input {
-          width: 100%;
-          border: none;
-          outline: none;
-          background: transparent;
-          font-size: 14px;
-          color: #1d2738;
-        }
-
-        .search-box input::placeholder {
-          color: #98a2b3;
-        }
-
-        .prd-count {
-          font-size: 13px;
-          color: #667085;
-        }
-
-        /* =====================================================
-           MAIN LAYOUT
-        ===================================================== */
-
-        .planner-layout {
+        .prd-grid {
           display: grid;
-          grid-template-columns: 380px minmax(0, 1fr);
-          gap: 22px;
-          align-items: start;
-        }
-
-        .prd-panel,
-        .content-panel {
-          background: white;
-          border: 1px solid #e2e5ec;
-          border-radius: 15px;
-          overflow: hidden;
-        }
-
-        .prd-panel {
-          min-height: 620px;
-        }
-
-        /* =====================================================
-           LEFT PANEL
-        ===================================================== */
-
-        .panel-header {
-          padding: 20px 20px 17px;
-          border-bottom: 1px solid #edf0f4;
-          display: flex;
-          align-items: flex-start;
-          justify-content: space-between;
-        }
-
-        .panel-header h2 {
-          margin: 0;
-          font-size: 17px;
-          font-weight: 700;
-        }
-
-        .panel-header p {
-          margin: 5px 0 0;
-          color: #7b879c;
-          font-size: 12px;
-        }
-
-        .count-badge {
-          min-width: 28px;
-          height: 28px;
-          padding: 0 8px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          border-radius: 50%;
-          background: #eeeaff;
-          color: #5b3df5;
-          font-weight: 700;
-          font-size: 12px;
-        }
-
-        .prd-list {
-          padding: 12px;
-          max-height: 690px;
-          overflow-y: auto;
+          grid-template-columns: repeat(3, 1fr);
+          gap: 16px;
         }
 
         .prd-card {
-          width: 100%;
-          text-align: left;
-          padding: 16px;
-          margin-bottom: 10px;
-          border: 1px solid #e5e8ef;
-          border-radius: 12px;
+          border: 1px solid #e1e5ee;
+          border-radius: 15px;
+          padding: 19px;
           background: white;
+          transition: 0.2s ease;
           cursor: pointer;
-          transition: all 0.18s ease;
-        }
-
-        .prd-card:last-child {
-          margin-bottom: 0;
         }
 
         .prd-card:hover {
-          border-color: #bcb2ff;
-          box-shadow: 0 5px 18px rgba(46, 37, 100, 0.06);
+          border-color: #6651e8;
+          box-shadow: 0 7px 20px rgba(91, 76, 180, 0.10);
           transform: translateY(-1px);
         }
 
         .prd-card.selected {
-          border-color: #6b50f5;
-          background: #f8f7ff;
-          box-shadow:
-            0 0 0 2px rgba(91, 61, 245, 0.10);
+          border: 2px solid #6046e5;
+          background: #faf9ff;
         }
 
-        .prd-card-top {
-          display: flex;
-          align-items: center;
-          gap: 11px;
-        }
-
-        .prd-card-icon {
-          width: 38px;
-          height: 38px;
-          border-radius: 10px;
-          background: #eeeaff;
-          color: #5b3df5;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          flex-shrink: 0;
-        }
-
-        .prd-card-title {
-          min-width: 0;
-          flex: 1;
-        }
-
-        .prd-card-title h3 {
-          margin: 0;
-          color: #172033;
-          font-size: 14px;
+        .prd-title {
+          font-size: 17px;
           font-weight: 700;
-          line-height: 1.35;
+          margin-bottom: 9px;
         }
 
-        .prd-card-title span {
-          display: block;
-          margin-top: 3px;
-          color: #98a2b3;
-          font-size: 10px;
-        }
-
-        .prd-arrow {
-          color: #a0a8b8;
-          flex-shrink: 0;
-        }
-
-        .prd-preview {
-          margin: 13px 0;
-          color: #71809b;
-          font-size: 12px;
+        .prd-problem {
+          color: #67748a;
           line-height: 1.55;
-          display: -webkit-box;
-          -webkit-line-clamp: 2;
-          -webkit-box-orient: vertical;
-          overflow: hidden;
+          font-size: 13px;
+          min-height: 63px;
         }
 
-        .prd-card-footer {
-          padding-top: 10px;
-          border-top: 1px solid #edf0f4;
+        .prd-footer {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          color: #98a2b3;
-          font-size: 10px;
-        }
-
-        .prd-card-footer span:first-child {
-          display: flex;
-          align-items: center;
-          gap: 4px;
-          color: #6b50f5;
-          font-weight: 600;
-        }
-
-        /* =====================================================
-           LOADING / EMPTY
-        ===================================================== */
-
-        .loading-state,
-        .empty-prd {
-          min-height: 400px;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          text-align: center;
-          padding: 30px;
-          color: #71809b;
-        }
-
-        .loading-state svg {
-          color: #5b3df5;
-        }
-
-        .loading-state p {
-          margin-top: 12px;
-          font-size: 13px;
-        }
-
-        .empty-icon {
-          width: 64px;
-          height: 64px;
-          border-radius: 16px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          background: #f0edff;
-          color: #5b3df5;
-        }
-
-        .empty-prd h3 {
-          margin: 16px 0 5px;
-          color: #172033;
-          font-size: 16px;
-        }
-
-        .empty-prd p {
-          max-width: 260px;
-          margin: 0;
-          font-size: 12px;
-          line-height: 1.6;
-        }
-
-        /* =====================================================
-           RIGHT EMPTY STATE
-        ===================================================== */
-
-        .content-panel {
-          min-height: 620px;
-        }
-
-        .select-prd-state {
-          min-height: 620px;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          text-align: center;
-          padding: 50px;
-        }
-
-        .select-icon {
-          width: 78px;
-          height: 78px;
-          border-radius: 20px;
-          background: #eeeaff;
-          color: #5b3df5;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          margin-bottom: 20px;
-        }
-
-        .select-prd-state h2 {
-          margin: 0;
-          font-size: 22px;
-          color: #172033;
-        }
-
-        .select-prd-state > p {
-          max-width: 500px;
-          margin: 9px 0 25px;
-          color: #71809b;
-          font-size: 13px;
-          line-height: 1.65;
-        }
-
-        .steps {
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          color: #7b879c;
-          font-size: 12px;
-          font-weight: 600;
-        }
-
-        .step {
-          display: flex;
-          align-items: center;
-          gap: 7px;
-        }
-
-        .step span {
-          width: 25px;
-          height: 25px;
-          border-radius: 50%;
-          background: #f0edff;
-          color: #5b3df5;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-size: 11px;
-          font-weight: 700;
-        }
-
-        /* =====================================================
-           SELECTED CONTENT
-        ===================================================== */
-
-        .selected-content {
-          padding: 25px;
-        }
-
-        .selected-prd-header {
-          display: flex;
-          align-items: flex-start;
-          justify-content: space-between;
-          gap: 20px;
-          padding-bottom: 22px;
-          border-bottom: 1px solid #edf0f4;
-        }
-
-        .selected-label {
-          display: flex;
-          align-items: center;
-          gap: 6px;
-          color: #5b3df5;
-          font-size: 11px;
-          font-weight: 700;
-          text-transform: uppercase;
-          letter-spacing: 0.5px;
-          margin-bottom: 7px;
-        }
-
-        .selected-prd-header h2 {
-          margin: 0;
-          font-size: 22px;
-          line-height: 1.3;
-        }
-
-        .selected-prd-header p {
-          max-width: 700px;
-          margin: 7px 0 0;
-          color: #71809b;
-          font-size: 13px;
-          line-height: 1.6;
-        }
-
-        .generate-roadmap-btn {
-          height: 44px;
-          padding: 0 18px;
-          flex-shrink: 0;
-          border: none;
-          border-radius: 9px;
-          background: #5b3df5;
-          color: white;
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          font-size: 13px;
-          font-weight: 700;
-          cursor: pointer;
-          box-shadow: 0 5px 12px rgba(91, 61, 245, 0.18);
-        }
-
-        .generate-roadmap-btn:hover {
-          background: #4c31dc;
-        }
-
-        .generate-roadmap-btn:disabled {
-          opacity: 0.65;
-          cursor: not-allowed;
-        }
-
-        /* =====================================================
-           SUMMARY
-        ===================================================== */
-
-        .prd-summary-grid {
-          display: grid;
-          grid-template-columns: repeat(3, 1fr);
-          gap: 12px;
-          margin: 20px 0;
-        }
-
-        .summary-card {
-          border: 1px solid #e8eaf0;
-          border-radius: 11px;
-          padding: 14px;
-          display: flex;
-          align-items: center;
-          gap: 10px;
-          background: #fbfbfd;
-        }
-
-        .summary-icon {
-          width: 34px;
-          height: 34px;
-          border-radius: 9px;
-          background: #eeeaff;
-          color: #5b3df5;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-        }
-
-        .summary-card span {
-          display: block;
-          color: #8791a5;
-          font-size: 10px;
-          margin-bottom: 3px;
-        }
-
-        .summary-card strong {
-          display: block;
-          color: #20283a;
-          font-size: 14px;
-        }
-
-        /* =====================================================
-           PRD DETAILS
-        ===================================================== */
-
-        .prd-details {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 22px;
-          margin-bottom: 25px;
-        }
-
-        .detail-section {
-          border: 1px solid #e8eaf0;
-          border-radius: 12px;
-          padding: 18px;
-        }
-
-        .detail-heading {
-          display: flex;
-          align-items: center;
-          gap: 7px;
-          color: #5b3df5;
-          margin-bottom: 13px;
-        }
-
-        .detail-heading h3 {
-          margin: 0;
-          color: #20283a;
-          font-size: 14px;
-        }
-
-        .detail-section ul {
-          margin: 0;
-          padding-left: 19px;
-        }
-
-        .detail-section li {
-          margin-bottom: 8px;
-          color: #657187;
-          font-size: 12px;
-          line-height: 1.5;
-        }
-
-        .muted {
-          margin: 0;
-          color: #98a2b3;
-          font-size: 12px;
-        }
-
-        .stories-list {
-          display: flex;
-          flex-direction: column;
-          gap: 10px;
-        }
-
-        .story-item {
-          display: flex;
-          gap: 9px;
-          padding: 10px;
-          border-radius: 8px;
-          background: #f8f9fc;
-        }
-
-        .story-number {
-          width: 23px;
-          height: 23px;
-          border-radius: 50%;
-          background: #eeeaff;
-          color: #5b3df5;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-size: 10px;
-          font-weight: 700;
-          flex-shrink: 0;
-        }
-
-        .story-item p {
-          margin: 0;
-          color: #4f5b70;
-          font-size: 11px;
-          line-height: 1.5;
-        }
-
-        .criteria-count {
-          display: inline-block;
-          margin-top: 4px;
-          color: #8c95a7;
-          font-size: 9px;
-        }
-
-        /* =====================================================
-           ROADMAP OUTPUT
-        ===================================================== */
-
-        .roadmap-output {
-          border-top: 1px solid #edf0f4;
-          padding-top: 23px;
-        }
-
-        .roadmap-output-header {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 15px;
-          margin-bottom: 18px;
-        }
-
-        .roadmap-title-row {
-          display: flex;
-          align-items: center;
-          gap: 9px;
-        }
-
-        .roadmap-title-icon {
-          width: 34px;
-          height: 34px;
-          border-radius: 9px;
-          background: #eeeaff;
-          color: #5b3df5;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-        }
-
-        .roadmap-title-row h2 {
-          margin: 0;
-          font-size: 18px;
-        }
-
-        .roadmap-output-header p {
-          margin: 4px 0 0 43px;
-          color: #7b879c;
-          font-size: 11px;
-        }
-
-        .milestone-count {
-          padding: 6px 10px;
-          border-radius: 20px;
-          background: #f0edff;
-          color: #5b3df5;
-          font-size: 10px;
-          font-weight: 700;
-        }
-
-        .roadmap-empty {
-          min-height: 230px;
-          border: 1px dashed #d9dce5;
-          border-radius: 12px;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          text-align: center;
-          padding: 30px;
-        }
-
-        .roadmap-empty-icon {
-          width: 55px;
-          height: 55px;
-          border-radius: 15px;
-          background: #eeeaff;
-          color: #5b3df5;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-        }
-
-        .roadmap-empty h3 {
-          margin: 13px 0 5px;
-          font-size: 15px;
-        }
-
-        .roadmap-empty p {
-          max-width: 450px;
-          margin: 0;
-          color: #7b879c;
-          font-size: 11px;
-          line-height: 1.6;
-        }
-
-        /* =====================================================
-           TIMELINE
-        ===================================================== */
-
-        .timeline {
-          position: relative;
-          padding: 4px 0 5px;
-        }
-
-        .timeline-item {
-          position: relative;
-          display: flex;
-          gap: 15px;
-          padding-bottom: 18px;
-        }
-
-        .timeline-item:last-child {
-          padding-bottom: 0;
-        }
-
-        .timeline-line {
-          position: absolute;
-          left: 17px;
-          top: 34px;
-          bottom: -1px;
-          width: 2px;
-          background: #e5e1ff;
-        }
-
-        .timeline-dot {
-          width: 36px;
-          height: 36px;
-          border-radius: 50%;
-          flex-shrink: 0;
-          position: relative;
-          z-index: 2;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          background: #f0edff;
-          color: #5b3df5;
-          border: 4px solid white;
-        }
-
-        .timeline-dot.completed {
-          background: #e7f8ef;
-          color: #15965c;
-        }
-
-        .timeline-dot.in-progress {
-          background: #fff4df;
-          color: #d88700;
-        }
-
-        .milestone-card {
-          flex: 1;
-          border: 1px solid #e5e8ef;
-          border-radius: 12px;
-          padding: 17px;
-          background: white;
-        }
-
-        .milestone-card:hover {
-          border-color: #d0caff;
-        }
-
-        .milestone-top {
-          display: flex;
-          align-items: flex-start;
-          justify-content: space-between;
-          gap: 15px;
-        }
-
-        .milestone-number {
-          display: block;
-          color: #8b82d9;
-          font-size: 9px;
-          font-weight: 800;
-          letter-spacing: 0.8px;
-          margin-bottom: 4px;
-        }
-
-        .milestone-top h3 {
-          margin: 0;
-          font-size: 15px;
-          line-height: 1.35;
-        }
-
-        .status {
-          width: fit-content;
-          padding: 5px 9px;
-          border-radius: 20px;
-          display: inline-flex;
-          align-items: center;
-          gap: 5px;
-          font-size: 10px;
-          font-weight: 700;
-          white-space: nowrap;
-        }
-
-        .status.planned {
-          background: #f0f2f5;
-          color: #667085;
-        }
-
-        .status.progress {
-          background: #fff4df;
-          color: #d88700;
-        }
-
-        .status.completed {
-          background: #e7f8ef;
-          color: #15965c;
-        }
-
-        .status.blocked {
-          background: #fff0f0;
-          color: #d92d20;
-        }
-
-        .milestone-meta {
-          display: flex;
-          align-items: flex-end;
-          gap: 20px;
           margin-top: 17px;
         }
 
-        .progress-wrapper {
+        .date {
+          color: #8993a5;
+          font-size: 12px;
+        }
+
+        button {
+          border: none;
+          cursor: pointer;
+          font-family: inherit;
+        }
+
+        .select-btn {
+          padding: 9px 15px;
+          background: #6046e5;
+          color: white;
+          border-radius: 9px;
+          font-weight: 650;
+        }
+
+        .select-btn:hover {
+          background: #4f39c9;
+        }
+
+        .selected-badge {
+          padding: 8px 13px;
+          border-radius: 9px;
+          background: #ece8ff;
+          color: #5540ca;
+          font-size: 13px;
+          font-weight: 700;
+        }
+
+        .selected-prd {
+          border: 2px solid #ded8ff;
+          background: #fbfaff;
+        }
+
+        .selected-prd-title {
+          font-size: 26px;
+          font-weight: 750;
+          margin-bottom: 22px;
+        }
+
+        .detail-block {
+          margin-bottom: 19px;
+        }
+
+        .detail-label {
+          font-weight: 700;
+          font-size: 14px;
+          margin-bottom: 6px;
+        }
+
+        .detail-text {
+          color: #68758b;
+          line-height: 1.65;
+          white-space: pre-line;
+        }
+
+        .generate-area {
+          display: flex;
+          justify-content: flex-end;
+          margin-top: 24px;
+        }
+
+        .generate-btn {
+          padding: 13px 21px;
+          background: #121827;
+          color: white;
+          border-radius: 10px;
+          font-size: 14px;
+          font-weight: 700;
+        }
+
+        .generate-btn:hover {
+          background: #20293a;
+        }
+
+        .generate-btn:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+
+        .error-box {
+          padding: 14px 17px;
+          background: #fff2f2;
+          border: 1px solid #ffcaca;
+          color: #c63838;
+          border-radius: 10px;
+          margin-bottom: 20px;
+        }
+
+        .loading {
+          text-align: center;
+          padding: 35px;
+          color: #718096;
+        }
+
+        .roadmap-header {
+          padding: 27px;
+          border-radius: 18px;
+          background: white;
+          border: 1px solid #e2e6ef;
+          margin-bottom: 18px;
+        }
+
+        .roadmap-header h2 {
+          margin: 0;
+          font-size: 28px;
+        }
+
+        .roadmap-header p {
+          margin: 8px 0 0;
+          color: #718096;
+        }
+
+        .stats {
+          display: grid;
+          grid-template-columns: repeat(6, 1fr);
+          gap: 13px;
+          margin-bottom: 22px;
+        }
+
+        .stat {
+          background: white;
+          border: 1px solid #e3e7ef;
+          border-radius: 13px;
+          padding: 18px;
+        }
+
+        .stat-number {
+          font-size: 25px;
+          font-weight: 750;
+          margin-bottom: 5px;
+        }
+
+        .stat-label {
+          color: #718096;
+          font-size: 12px;
+        }
+
+        .execution-box {
+          background: white;
+          border: 1px solid #e2e6ef;
+          border-radius: 18px;
+          padding: 26px;
+        }
+
+        .execution-heading {
+          font-size: 20px;
+          font-weight: 700;
+          margin-bottom: 4px;
+        }
+
+        .execution-description {
+          color: #718096;
+          font-size: 14px;
+          margin-bottom: 22px;
+        }
+
+        .feature-card {
+          border: 1px solid #e0e4ed;
+          border-radius: 16px;
+          margin-bottom: 18px;
+          overflow: hidden;
+          background: white;
+        }
+
+        .feature-top {
+          padding: 22px;
+        }
+
+        .feature-heading {
+          display: flex;
+          gap: 14px;
+          align-items: flex-start;
+        }
+
+        .number {
+          min-width: 36px;
+          height: 36px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          border-radius: 50%;
+          background: #6246e5;
+          color: white;
+          font-weight: 750;
+        }
+
+        .feature-name {
+          font-size: 20px;
+          font-weight: 700;
           flex: 1;
         }
 
-        .progress-label {
+        .feature-description {
+          margin-left: 50px;
+          margin-top: 4px;
+          color: #69758a;
+          line-height: 1.5;
+        }
+
+        .status {
+          padding: 8px 12px;
+          border-radius: 20px;
+          font-size: 12px;
+          font-weight: 700;
+        }
+
+        .status-planned {
+          background: #eeeaff;
+          color: #5942d2;
+        }
+
+        .status-progress {
+          background: #fff4dc;
+          color: #a46b00;
+        }
+
+        .status-completed {
+          background: #e5f8ed;
+          color: #23804b;
+        }
+
+        .status-blocked {
+          background: #ffe7e7;
+          color: #c83232;
+        }
+
+        .priority-high {
+          color: #d63434;
+        }
+
+        .priority-medium {
+          color: #a66a00;
+        }
+
+        .priority-low {
+          color: #54708e;
+        }
+
+        .meta-grid {
+          display: grid;
+          grid-template-columns: repeat(5, 1fr);
+          gap: 12px;
+          margin-top: 21px;
+          margin-left: 50px;
+        }
+
+        .meta {
+          background: #f7f8fc;
+          padding: 13px;
+          border-radius: 10px;
+        }
+
+        .meta-label {
+          display: block;
+          font-size: 11px;
+          color: #8993a5;
+          margin-bottom: 5px;
+        }
+
+        .meta-value {
+          font-size: 14px;
+          font-weight: 700;
+        }
+
+        .progress-section {
+          margin: 22px 0 0 50px;
+        }
+
+        .progress-header {
           display: flex;
           justify-content: space-between;
-          margin-bottom: 6px;
-          color: #8791a5;
-          font-size: 10px;
+          font-size: 13px;
+          font-weight: 700;
+          margin-bottom: 7px;
         }
 
-        .progress-label strong {
-          color: #344054;
-        }
-
-        .progress-track {
-          height: 6px;
-          background: #eceef4;
+        .progress-bar {
+          height: 8px;
+          background: #e9ebf2;
           border-radius: 10px;
           overflow: hidden;
         }
 
         .progress-fill {
           height: 100%;
-          background: #5b3df5;
+          background: #6246e5;
           border-radius: 10px;
-          transition: width 0.35s ease;
         }
 
-        .date-range {
-          display: flex;
-          align-items: center;
-          gap: 5px;
-          color: #7b879c;
-          font-size: 10px;
-          white-space: nowrap;
+        .plan-box {
+          margin: 20px 0 0 50px;
+          padding: 17px;
+          background: #f6f7fb;
+          border-radius: 11px;
         }
 
-        /* =====================================================
-           ANIMATION
-        ===================================================== */
-
-        .spin {
-          animation: roadmapSpin 1s linear infinite;
+        .plan-title {
+          font-weight: 700;
+          margin-bottom: 7px;
         }
 
-        @keyframes roadmapSpin {
-          from {
-            transform: rotate(0deg);
+        .plan-text {
+          color: #4f5d73;
+          line-height: 1.5;
+        }
+
+        .next-action {
+          margin: 15px 0 0 50px;
+          padding: 17px;
+          background: #f0f5ff;
+          border: 1px solid #cfddff;
+          border-radius: 11px;
+        }
+
+        .next-title {
+          font-weight: 700;
+          margin-bottom: 7px;
+        }
+
+        .blocker-box {
+          margin: 15px 0 0 50px;
+          padding: 18px;
+          background: #fff4f4;
+          border: 1px solid #ffd0d0;
+          border-radius: 11px;
+        }
+
+        .blocker-title {
+          color: #c83232;
+          font-weight: 750;
+          margin-bottom: 8px;
+        }
+
+        .resolution {
+          margin-top: 15px;
+        }
+
+        .resolution-title {
+          font-weight: 700;
+          margin-bottom: 9px;
+        }
+
+        .resolution ol {
+          margin: 0;
+          padding-left: 22px;
+        }
+
+        .resolution li {
+          margin-bottom: 7px;
+          color: #4f5d73;
+          line-height: 1.45;
+        }
+
+        .details-toggle {
+          margin: 18px 0 0 50px;
+          padding: 10px 0;
+          color: #6046e5;
+          font-weight: 700;
+          background: transparent;
+        }
+
+        .details {
+          margin: 0 0 18px 50px;
+          padding: 16px;
+          background: #fafbfe;
+          border-top: 1px solid #e6e9f0;
+        }
+
+        .dependency-line {
+          margin-bottom: 9px;
+          color: #5d6a7f;
+        }
+
+        .dependency-line strong {
+          color: #1b2537;
+        }
+
+        .empty {
+          text-align: center;
+          padding: 45px;
+          color: #7b879a;
+        }
+
+        @media (max-width: 1000px) {
+          .prd-grid {
+            grid-template-columns: repeat(2, 1fr);
           }
 
-          to {
-            transform: rotate(360deg);
+          .stats {
+            grid-template-columns: repeat(3, 1fr);
+          }
+
+          .meta-grid {
+            grid-template-columns: repeat(3, 1fr);
           }
         }
 
-        /* =====================================================
-           RESPONSIVE
-        ===================================================== */
-
-        @media (max-width: 1100px) {
-
-          .planner-layout {
-            grid-template-columns: 320px minmax(0, 1fr);
-          }
-
-          .prd-details {
-            grid-template-columns: 1fr;
-          }
-
-        }
-
-        @media (max-width: 850px) {
-
+        @media (max-width: 700px) {
           .roadmap-page {
-            padding: 22px 18px 40px;
+            padding: 20px;
           }
 
-          .planner-layout {
+          .prd-grid {
             grid-template-columns: 1fr;
           }
 
-          .prd-panel {
-            min-height: auto;
+          .stats {
+            grid-template-columns: repeat(2, 1fr);
           }
 
-          .prd-list {
-            max-height: 420px;
+          .meta-grid {
+            grid-template-columns: 1fr 1fr;
+            margin-left: 0;
           }
 
-          .selected-prd-header {
-            flex-direction: column;
+          .feature-description,
+          .progress-section,
+          .plan-box,
+          .next-action,
+          .blocker-box,
+          .details-toggle,
+          .details {
+            margin-left: 0;
           }
 
-          .generate-roadmap-btn {
-            width: 100%;
-            justify-content: center;
+          .feature-heading {
+            flex-wrap: wrap;
           }
-
-          .prd-summary-grid {
-            grid-template-columns: 1fr;
-          }
-
-        }
-
-        @media (max-width: 600px) {
-
-          .roadmap-header {
-            align-items: flex-start;
-          }
-
-          .roadmap-header h1 {
-            font-size: 23px;
-          }
-
-          .refresh-btn {
-            padding: 0 11px;
-          }
-
-          .refresh-btn {
-            font-size: 0;
-          }
-
-          .refresh-btn svg {
-            margin: 0;
-          }
-
-          .toolbar {
-            flex-direction: column;
-            align-items: stretch;
-            gap: 8px;
-          }
-
-          .search-box {
-            width: 100%;
-          }
-
-          .selected-content {
-            padding: 17px;
-          }
-
-          .selected-prd-header h2 {
-            font-size: 19px;
-          }
-
-          .milestone-top {
-            flex-direction: column;
-          }
-
-          .milestone-meta {
-            flex-direction: column;
-            align-items: stretch;
-          }
-
-          .date-range {
-            justify-content: flex-start;
-          }
-
         }
 
       `}</style>
+
+      <div className="roadmap-container">
+
+        {/* HEADER */}
+        <div className="page-header">
+          <h1>Roadmap Planner</h1>
+
+          <p>
+            Turn generated product requirements into an executable
+            development plan with priorities, dependencies, blockers,
+            resolution steps and next actions.
+          </p>
+        </div>
+
+        {/* ERROR */}
+        {error && (
+          <div className="error-box">
+            {error}
+          </div>
+        )}
+
+        {/* GENERATED PRDS */}
+        <div className="section">
+
+          <div className="section-title">
+            Generated PRDs
+          </div>
+
+          <div className="section-subtitle">
+            Select a PRD generated by the PRD Agent.
+            The roadmap will be generated automatically from the selected requirement.
+          </div>
+
+          {loadingPRDs ? (
+            <div className="loading">
+              Loading generated PRDs...
+            </div>
+          ) : prds.length === 0 ? (
+            <div className="empty">
+              No generated PRDs found.
+              <br />
+              Generate a PRD first from the PRD Generator.
+            </div>
+          ) : (
+            <div className="prd-grid">
+
+              {prds.map((prd) => {
+                const normalized = normalizePRD(prd);
+
+                const isSelected =
+                  selectedPRD?.id === normalized.id;
+
+                return (
+                  <div
+                    key={normalized.id}
+                    className={`prd-card ${
+                      isSelected ? "selected" : ""
+                    }`}
+                    onClick={() => selectPRD(prd)}
+                  >
+
+                    <div className="prd-title">
+                      {normalized.title}
+                    </div>
+
+                    <div className="prd-problem">
+                      {normalized.problem_statement}
+                    </div>
+
+                    <div className="prd-footer">
+
+                      <span className="date">
+                        {normalized.created_at
+                          ? `Generated: ${formatDate(
+                              normalized.created_at
+                            )}`
+                          : "Generated PRD"}
+                      </span>
+
+                      {isSelected ? (
+                        <span className="selected-badge">
+                          Selected
+                        </span>
+                      ) : (
+                        <button
+                          className="select-btn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            selectPRD(prd);
+                          }}
+                        >
+                          Select PRD
+                        </button>
+                      )}
+
+                    </div>
+                  </div>
+                );
+              })}
+
+            </div>
+          )}
+        </div>
+
+        {/* SELECTED PRD */}
+        {selectedPRD && (
+          <div
+            className="section selected-prd"
+            ref={selectedRef}
+          >
+
+            <div className="section-title">
+              Selected PRD
+            </div>
+
+            <div className="section-subtitle">
+              Review the requirement and generate its execution roadmap.
+            </div>
+
+            <div className="selected-prd-title">
+              {selectedPRD.title}
+            </div>
+
+            <div className="detail-block">
+              <div className="detail-label">
+                Problem Statement
+              </div>
+
+              <div className="detail-text">
+                {selectedPRD.problem_statement}
+              </div>
+            </div>
+
+            <div className="detail-block">
+              <div className="detail-label">
+                Objectives
+              </div>
+
+              <div className="detail-text">
+                {selectedPRD.objectives}
+              </div>
+            </div>
+
+            {selectedPRD.user_stories && (
+              <div className="detail-block">
+                <div className="detail-label">
+                  User Stories
+                </div>
+
+                <div className="detail-text">
+                  {selectedPRD.user_stories}
+                </div>
+              </div>
+            )}
+
+            <div className="generate-area">
+
+              <button
+                className="generate-btn"
+                disabled={generating}
+                onClick={() => generateRoadmap()}
+              >
+                {generating
+                  ? "Generating Roadmap..."
+                  : "✨ Generate Roadmap"}
+              </button>
+
+            </div>
+
+          </div>
+        )}
+
+        {/* LOADING */}
+        {generating && (
+          <div className="section">
+            <div className="loading">
+              <strong>AI is creating the execution plan...</strong>
+              <br />
+              <br />
+              Analyzing priority, dependencies, sprint allocation,
+              blockers and next actions.
+            </div>
+          </div>
+        )}
+
+        {/* ROADMAP */}
+        {roadmap && !generating && (
+          <div ref={roadmapRef}>
+
+            {/* ROADMAP TITLE */}
+            <div className="roadmap-header">
+
+              <h2>
+                {roadmap.roadmap_name}
+              </h2>
+
+              <p>
+                Timeline: {roadmap.timeline}
+              </p>
+
+            </div>
+
+            {/* STATS */}
+            <div className="stats">
+
+              <div className="stat">
+                <div className="stat-number">
+                  {totalFeatures}
+                </div>
+                <div className="stat-label">
+                  Total Features
+                </div>
+              </div>
+
+              <div className="stat">
+                <div className="stat-number">
+                  {highPriority}
+                </div>
+                <div className="stat-label">
+                  High Priority
+                </div>
+              </div>
+
+              <div className="stat">
+                <div className="stat-number">
+                  {blocked}
+                </div>
+                <div className="stat-label">
+                  Blocked
+                </div>
+              </div>
+
+              <div className="stat">
+                <div className="stat-number">
+                  {inProgress}
+                </div>
+                <div className="stat-label">
+                  In Progress
+                </div>
+              </div>
+
+              <div className="stat">
+                <div className="stat-number">
+                  {planned}
+                </div>
+                <div className="stat-label">
+                  Planned
+                </div>
+              </div>
+
+              <div className="stat">
+                <div className="stat-number">
+                  {completed}
+                </div>
+                <div className="stat-label">
+                  Completed
+                </div>
+              </div>
+
+            </div>
+
+            {/* EXECUTION PLAN */}
+            <div className="execution-box">
+
+              <div className="execution-heading">
+                📋 Execution Plan
+              </div>
+
+              <div className="execution-description">
+                This roadmap shows what should be done,
+                when it should be done, what is blocking the work,
+                how to resolve blockers, and the next action required.
+              </div>
+
+              {roadmap.features.length === 0 ? (
+                <div className="empty">
+                  No roadmap features were generated.
+                </div>
+              ) : (
+
+                roadmap.features.map((feature, index) => {
+
+                  const isExpanded =
+                    expandedFeature === index;
+
+                  return (
+                    <div
+                      className="feature-card"
+                      key={index}
+                    >
+
+                      <div className="feature-top">
+
+                        {/* TITLE */}
+                        <div className="feature-heading">
+
+                          <div className="number">
+                            {index + 1}
+                          </div>
+
+                          <div className="feature-name">
+                            {feature.feature_name}
+                          </div>
+
+                          <div
+                            className={`status ${getStatusClass(
+                              feature.status
+                            )}`}
+                          >
+                            {feature.status}
+                          </div>
+
+                        </div>
+
+                        {/* DESCRIPTION */}
+                        <div className="feature-description">
+                          {feature.description}
+                        </div>
+
+                        {/* META */}
+                        <div className="meta-grid">
+
+                          <div className="meta">
+                            <span className="meta-label">
+                              Priority
+                            </span>
+
+                            <span
+                              className={`meta-value ${getPriorityClass(
+                                feature.priority
+                              )}`}
+                            >
+                              {feature.priority}
+                            </span>
+                          </div>
+
+                          <div className="meta">
+                            <span className="meta-label">
+                              Sprint
+                            </span>
+
+                            <span className="meta-value">
+                              {feature.release}
+                            </span>
+                          </div>
+
+                          <div className="meta">
+                            <span className="meta-label">
+                              Milestone
+                            </span>
+
+                            <span className="meta-value">
+                              {feature.milestone}
+                            </span>
+                          </div>
+
+                          <div className="meta">
+                            <span className="meta-label">
+                              RICE
+                            </span>
+
+                            <span className="meta-value">
+                              {feature.rice_score ?? "—"}
+                            </span>
+                          </div>
+
+                          <div className="meta">
+                            <span className="meta-label">
+                              ICE
+                            </span>
+
+                            <span className="meta-value">
+                              {feature.ice_score ?? "—"}
+                            </span>
+                          </div>
+
+                        </div>
+
+                        {/* PROGRESS */}
+                        <div className="progress-section">
+
+                          <div className="progress-header">
+
+                            <span>
+                              Progress
+                            </span>
+
+                            <span>
+                              {feature.progress}%
+                            </span>
+
+                          </div>
+
+                          <div className="progress-bar">
+
+                            <div
+                              className="progress-fill"
+                              style={{
+                                width: `${feature.progress}%`,
+                              }}
+                            />
+
+                          </div>
+
+                        </div>
+
+                        {/* PLAN */}
+                        <div className="plan-box">
+
+                          <div className="plan-title">
+                            📌 Plan
+                          </div>
+
+                          <div className="plan-text">
+                            {feature.reason}
+                          </div>
+
+                        </div>
+
+                        {/* BLOCKER */}
+                        {feature.status === "Blocked" && (
+                          <div className="blocker-box">
+
+                            <div className="blocker-title">
+                              🚫 Blocker
+                            </div>
+
+                            <div>
+                              {feature.blocker ||
+                                "This feature is blocked by an unresolved dependency."}
+                            </div>
+
+                            {feature.resolution_steps?.length > 0 && (
+                              <div className="resolution">
+
+                                <div className="resolution-title">
+                                  How to resolve the blocker
+                                </div>
+
+                                <ol>
+
+                                  {feature.resolution_steps.map(
+                                    (step, stepIndex) => (
+                                      <li key={stepIndex}>
+                                        {step}
+                                      </li>
+                                    )
+                                  )}
+
+                                </ol>
+
+                              </div>
+                            )}
+
+                          </div>
+                        )}
+
+                        {/* NEXT ACTION */}
+                        <div className="next-action">
+
+                          <div className="next-title">
+                            ▶ Next Action
+                          </div>
+
+                          <div>
+                            {feature.next_action}
+                          </div>
+
+                        </div>
+
+                        {/* DETAILS BUTTON */}
+                        <button
+                          className="details-toggle"
+                          onClick={() =>
+                            toggleFeature(index)
+                          }
+                        >
+                          {isExpanded
+                            ? "▲ Hide dependency details"
+                            : "▼ Show dependency details"}
+                        </button>
+
+                      </div>
+
+                      {/* DETAILS */}
+                      {isExpanded && (
+                        <div className="details">
+
+                          <div className="dependency-line">
+                            <strong>
+                              Dependencies:
+                            </strong>{" "}
+                            {feature.dependencies.length
+                              ? feature.dependencies.join(", ")
+                              : "No dependencies"}
+                          </div>
+
+                          <div className="dependency-line">
+                            <strong>
+                              Unresolved Dependencies:
+                            </strong>{" "}
+                            {feature.unresolved_dependencies.length
+                              ? feature.unresolved_dependencies.join(", ")
+                              : "None"}
+                          </div>
+
+                          <div className="dependency-line">
+                            <strong>
+                              Blocked By:
+                            </strong>{" "}
+                            {feature.blocked_by.length
+                              ? feature.blocked_by.join(", ")
+                              : "None"}
+                          </div>
+
+                        </div>
+                      )}
+
+                    </div>
+                  );
+                })
+
+              )}
+
+            </div>
+
+          </div>
+        )}
+
+      </div>
     </div>
   );
 }
-
-export default RoadmapPlanner;

@@ -1,91 +1,57 @@
-from typing import List, Literal, Optional
+# backend/ai_schemas/roadmap_schema.py
 
 from pydantic import BaseModel, Field
+from typing import List, Optional, Literal
 
 
 class RoadmapFeature(BaseModel):
-    """
-    Represents a single feature in the product roadmap.
-    """
 
     feature_name: str = Field(
         ...,
-        min_length=1,
-        description="Name of the product feature."
+        min_length=1
     )
 
     description: str = Field(
         ...,
-        min_length=1,
-        description="Short and practical description of the feature."
+        min_length=1
     )
 
-    priority: Literal["High", "Medium", "Low"] = Field(
-        ...,
-        description=(
-            "Priority assigned by the Prioritization Agent. "
-            "Must be High, Medium, or Low."
-        )
-    )
+    priority: Literal[
+        "High",
+        "Medium",
+        "Low"
+    ]
 
     rice_score: Optional[float] = Field(
         default=None,
-        ge=0,
-        description=(
-            "RICE score received from the Prioritization Agent. "
-            "The value must not be negative."
-        )
+        ge=0
     )
 
     ice_score: Optional[float] = Field(
         default=None,
-        ge=0,
-        description=(
-            "ICE score received from the Prioritization Agent. "
-            "The value must not be negative."
-        )
+        ge=0
     )
 
     dependencies: List[str] = Field(
-        default_factory=list,
-        description=(
-            "Features or tasks that must be completed "
-            "before this feature can be implemented."
-        )
+        default_factory=list
     )
 
     unresolved_dependencies: List[str] = Field(
-        default_factory=list,
-        description=(
-            "Dependencies that are not present in the "
-            "provided feature list."
-        )
+        default_factory=list
     )
 
     blocked_by: List[str] = Field(
-        default_factory=list,
-        description=(
-            "Unresolved dependencies that currently block "
-            "this feature."
-        )
+        default_factory=list
     )
 
     release: str = Field(
         ...,
-        min_length=1,
-        description=(
-            "Sprint or release in which the feature is planned. "
-            "Use sprint-based values such as Sprint 1, Sprint 2, "
-            "or Future Sprint. Do not use Q1, Q2, Q3, or Q4."
-        )
+        min_length=1
     )
 
     milestone: str = Field(
         ...,
-        min_length=1,
-        description=(
-            "Meaningful milestone associated with the feature."
-        )
+        min_length=1
     )
 
     status: Literal[
@@ -93,51 +59,43 @@ class RoadmapFeature(BaseModel):
         "In Progress",
         "Completed",
         "Blocked"
-    ] = Field(
-        default="Planned",
-        description=(
-            "Current implementation status of the feature."
-        )
+    ] = "Planned"
+
+    progress: int = Field(
+        default=0,
+        ge=0,
+        le=100
     )
 
     reason: str = Field(
         ...,
-        min_length=1,
-        description=(
-            "Practical reason explaining why the feature "
-            "is placed in the selected sprint or release."
-        )
+        min_length=1
     )
+
+    blocker: str = ""
+
+    resolution_steps: List[str] = Field(
+        default_factory=list
+    )
+
+    next_action: str = ""
 
 
 class Roadmap(BaseModel):
-    """
-    Represents the complete product roadmap.
-    """
 
     roadmap_name: str = Field(
         ...,
-        min_length=1,
-        description="Name of the product roadmap."
+        min_length=1
     )
 
     timeline: str = Field(
         ...,
-        min_length=1,
-        description=(
-            "Overall sprint-based roadmap timeline. "
-            "Use sprint-based planning such as Sprint 1, "
-            "Sprint 2, Sprint 3, or Future Sprint. "
-            "Do not invent calendar years or use Q1, Q2, "
-            "Q3, or Q4 unless explicitly provided."
-        )
+        min_length=1
     )
 
-    features: List[RoadmapFeature] = Field(
+    features: List[
+        RoadmapFeature
+    ] = Field(
         ...,
-        min_length=1,
-        description=(
-            "List of prioritized product features included "
-            "in the roadmap."
-        )
+        min_length=1
     )

@@ -1,1467 +1,853 @@
-from datetime import date
-from typing import Any
-
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from db import SessionLocal
-from models import (
-    RoadmapItem,
-    FeatureRequest,
-    PRDDocument,
-    PriorityScore,
-)
-
+from models import RoadmapItem, FeatureRequest, PRDDocument, PriorityScore
 from agents.roadmap_agent import RoadmapAgent
 
 
 router = APIRouter(
     prefix="/roadmap",
-    tags=["Roadmap"],
+    tags=["Roadmap"]
 )
 
 
 # ============================================================
-# STATUS / PROGRESS
+# REQUEST SCHEMAS
 # ============================================================
 
-PROGRESS_MAP = {
-    "Completed": 100,
-    "In Progress": 65,
-    "Planned": 0,
-    "Blocked": 0,
-    "Backlog": 0,
-}
-
-
-VALID_STATUSES = {
-    "Completed",
-    "In Progress",
-    "Planned",
-    "Blocked",
-    "Backlog",
-}
+class GenerateRoadmapRequest(BaseModel):
+    prd_id: int
 
 
 # ============================================================
-# HELPERS
+# HELPER FUNCTIONS
 # ============================================================
 
-def make_feature_title(text: str) -> str:
+def progress_from_status(status: str) -> int:
     """
-    Create a clean title for a roadmap feature.
+    Convert roadmap status into a percentage.
     """
 
-    text = (text or "").strip()
+    status_map = {
+        "Completed": 100,
+        "In Progress": 65,
+        "Planned": 0,
+        "Blocked": 0,
+        "Backlog": 0,
+    }
 
-    if not text:
-        return "Roadmap Feature"
-
-    if len(text) <= 150:
-        return text
-
-    return text[:147].rsplit(" ", 1)[0] + "..."
+    return status_map.get(status, 0)
 
 
-def serialize_roadmap_item(
-    item: RoadmapItem,
-    feature: FeatureRequest | None,
+def clean_text(value) -> str:
+    """
+    Safely convert database values to strings.
+    """
+
+    if value is None:
+        return ""
+
+    return str(value).strip()
+
+
+def get_feature_priority(
+    db: Session,
+    feature_id: int | None
+) -> tuple[str, float | None, float | None]:
+
+    """
+    Get priority, RICE and ICE scores from PriorityScore.
+    """
+
+    if not feature_id:
+        return "Medium", None, None
+
+    priority_score = (
+        db.query(PriorityScore)
+        .filter(PriorityScore.feature_id == feature_id)
+        .order_by(PriorityScore.created_at.desc())
+        .first()
+    )
+
+    if not priority_score:
+        return "Medium", None, None
+
+    rice_score = priority_score.rice_score
+    ice_score = priority_score.ice_score
+
+    # --------------------------------------------------------
+    # Determine priority from impact level / scores
+    # --------------------------------------------------------
+
+    impact_level = clean_text(
+        getattr(priority_score, "impact_level", "")
+    ).lower()
+
+    if impact_level == "high":
+        priority = "High"
+
+    elif impact_level == "low":
+        priority = "Low"
+
+    else:
+        # If impact level is not available, use RICE score
+        if rice_score is not None:
+            if rice_score >= 75:
+                priority = "High"
+            elif rice_score >= 40:
+                priority = "Medium"
+            else:
+                priority = "Low"
+
+        elif ice_score is not None:
+            if ice_score >= 15:
+                priority = "High"
+            elif ice_score >= 8:
+                priority = "Medium"
+            else:
+                priority = "Low"
+
+        else:
+            priority = "Medium"
+
+    return priority, rice_score, ice_score
+
+
+def get_feature_for_prd(
+    db: Session,
+    prd: PRDDocument
 ):
     """
-    Convert a RoadmapItem database object into a frontend-friendly
-    dictionary.
+    Find the FeatureRequest connected to the PRD.
+
+    First:
+        PRDDocument.feature_id
+
+    If that is unavailable:
+        Try matching the PRD title with FeatureRequest.title
     """
 
-    status = item.status or "Planned"
+    feature = None
+
+    # --------------------------------------------------------
+    # 1. Use PRD -> FeatureRequest relationship
+    # --------------------------------------------------------
+
+    if prd.feature_id:
+
+        feature = (
+            db.query(FeatureRequest)
+            .filter(
+                FeatureRequest.id == prd.feature_id
+            )
+            .first()
+        )
+
+    # --------------------------------------------------------
+    # 2. Fallback: match title
+    # --------------------------------------------------------
+
+    if not feature and prd.title:
+
+        feature = (
+            db.query(FeatureRequest)
+            .filter(
+                FeatureRequest.title == prd.title
+            )
+            .order_by(FeatureRequest.id.desc())
+            .first()
+        )
+
+    return feature
+
+
+def make_feature_for_roadmap(
+    db: Session,
+    prd: PRDDocument
+):
+    """
+    Convert a generated PRD into the exact feature structure
+    expected by the Roadmap Agent.
+
+    IMPORTANT:
+    The feature_name is always the PRD title.
+
+    We DO NOT use the user story as the feature name.
+    """
+
+    feature = get_feature_for_prd(db, prd)
+
+    # --------------------------------------------------------
+    # Feature name
+    # --------------------------------------------------------
+
+    feature_name = clean_text(prd.title)
+
+    if feature and feature.title:
+        feature_name = clean_text(feature.title)
+
+    if not feature_name:
+        feature_name = "Product Feature"
+
+    # --------------------------------------------------------
+    # Description
+    # --------------------------------------------------------
+
+    description = ""
+
+    if feature and feature.description:
+        description = clean_text(feature.description)
+
+    if not description:
+        description = clean_text(prd.problem_statement)
+
+    if not description:
+        description = "Feature generated from the selected PRD."
+
+    # --------------------------------------------------------
+    # Priority / RICE / ICE
+    # --------------------------------------------------------
+
+    feature_id = feature.id if feature else prd.feature_id
+
+    priority, rice_score, ice_score = get_feature_priority(
+        db,
+        feature_id
+    )
+
+    # --------------------------------------------------------
+    # Dependencies
+    # --------------------------------------------------------
+
+    dependencies = []
+
+    # The current PRD model stores user stories as text.
+    # We do NOT treat user stories as dependencies.
+    #
+    # Dependencies will be determined by the Roadmap Agent
+    # when enough dependency information is available.
 
     return {
-        "id": item.id,
+        "feature_name": feature_name,
+        "description": description,
+        "priority": priority,
+        "rice_score": rice_score,
+        "ice_score": ice_score,
+        "dependencies": dependencies,
+    }
 
-        "feature_id": item.feature_id,
 
-        "title": (
-            feature.title
-            if feature
-            else "Roadmap Feature"
+# ============================================================
+# SERIALIZATION
+# ============================================================
+
+def serialize_roadmap_feature(
+    feature,
+    index: int
+):
+
+    status = getattr(
+        feature,
+        "status",
+        "Planned"
+    ) or "Planned"
+
+    progress = getattr(
+        feature,
+        "progress",
+        None
+    )
+
+    if progress is None:
+        progress = progress_from_status(status)
+
+    dependencies = getattr(
+        feature,
+        "dependencies",
+        []
+    ) or []
+
+    unresolved_dependencies = getattr(
+        feature,
+        "unresolved_dependencies",
+        []
+    ) or []
+
+    blocked_by = getattr(
+        feature,
+        "blocked_by",
+        []
+    ) or []
+
+    resolution_steps = getattr(
+        feature,
+        "resolution_steps",
+        []
+    ) or []
+
+    return {
+        "id": index,
+
+        "feature_name": clean_text(
+            getattr(feature, "feature_name", "")
         ),
 
-        "description": (
-            feature.description
-            if feature
-            else ""
+        "title": clean_text(
+            getattr(feature, "feature_name", "")
         ),
 
-        # Sprint-based roadmap.
-        "phase": item.phase or "",
+        "description": clean_text(
+            getattr(feature, "description", "")
+        ),
 
-        # Kept for frontend compatibility.
-        # We intentionally do not use Q1/Q2/Q3/Q4.
-        "quarter": "",
+        "priority": getattr(
+            feature,
+            "priority",
+            "Medium"
+        ),
+
+        "rice_score": getattr(
+            feature,
+            "rice_score",
+            None
+        ),
+
+        "ice_score": getattr(
+            feature,
+            "ice_score",
+            None
+        ),
+
+        "release": clean_text(
+            getattr(feature, "release", "Sprint 1")
+        ),
+
+        "sprint": clean_text(
+            getattr(feature, "release", "Sprint 1")
+        ),
+
+        "milestone": clean_text(
+            getattr(feature, "milestone", "Product Milestone")
+        ),
 
         "status": status,
 
-        "progress": PROGRESS_MAP.get(
-            status,
-            0,
+        "progress": progress,
+
+        "dependencies": dependencies,
+
+        "unresolved_dependencies": unresolved_dependencies,
+
+        "blocked_by": blocked_by,
+
+        "blocker": clean_text(
+            getattr(feature, "blocker", "")
         ),
 
-        "start_date": (
-            str(item.start_date)
-            if item.start_date
-            else ""
+        "resolution_steps": resolution_steps,
+
+        "next_action": clean_text(
+            getattr(feature, "next_action", "")
         ),
 
-        "end_date": (
-            str(item.end_date)
-            if item.end_date
-            else ""
-        ),
-
-        "created_at": (
-            str(item.created_at)
-            if item.created_at
-            else ""
+        "reason": clean_text(
+            getattr(feature, "reason", "")
         ),
     }
-
-
-def roadmap_feature_to_dict(feature: Any) -> dict:
-    """
-    Convert the structured Roadmap Agent output into
-    a JSON-compatible dictionary.
-    """
-
-    return {
-        "feature_name": feature.feature_name,
-
-        "description": feature.description,
-
-        "priority": feature.priority,
-
-        "rice_score": feature.rice_score,
-
-        "ice_score": feature.ice_score,
-
-        "dependencies": feature.dependencies,
-
-        "unresolved_dependencies": (
-            feature.unresolved_dependencies
-        ),
-
-        "blocked_by": feature.blocked_by,
-
-        "release": feature.release,
-
-        "milestone": feature.milestone,
-
-        "status": feature.status,
-
-        "reason": feature.reason,
-    }
-
-
-# ============================================================
-# PRD USER STORY PARSER
-# ============================================================
-
-def extract_prd_user_stories(
-    user_stories_text: str | None,
-) -> list[str]:
-    """
-    Extract user stories from the text stored in PRDDocument.
-
-    The PRD Agent stores user stories in a format similar to:
-
-        User Story 1:
-        As a user, I want to ...
-
-        Acceptance Criteria:
-        ...
-        ...
-
-        User Story 2:
-        As a user, I want to ...
-
-    Only the actual user-story text is passed to the
-    Roadmap Agent.
-    """
-
-    if not user_stories_text:
-        return []
-
-    text = user_stories_text.strip()
-
-    if not text:
-        return []
-
-    stories: list[str] = []
-
-    # --------------------------------------------------------
-    # Primary parsing method
-    # --------------------------------------------------------
-
-    sections = text.split("User Story ")
-
-    for section in sections:
-
-        section = section.strip()
-
-        if not section:
-            continue
-
-        lines = section.splitlines()
-
-        story_lines: list[str] = []
-
-        for line in lines:
-
-            line = line.strip()
-
-            if not line:
-                continue
-
-            # Skip numeric story number.
-            if line.rstrip(":").isdigit():
-                continue
-
-            # Stop when acceptance criteria begins.
-            if line.lower().startswith(
-                "acceptance criteria"
-            ):
-                break
-
-            # Remove common numbering.
-            if line.startswith(("1.", "2.", "3.", "4.", "5.")):
-                line = line[2:].strip()
-
-            story_lines.append(line)
-
-        if story_lines:
-
-            story = " ".join(
-                story_lines
-            ).strip()
-
-            if story:
-                stories.append(story)
-
-    # --------------------------------------------------------
-    # Fallback
-    # --------------------------------------------------------
-
-    if not stories:
-
-        lines = text.splitlines()
-
-        current_story: list[str] = []
-
-        for line in lines:
-
-            line = line.strip()
-
-            if not line:
-                continue
-
-            if line.lower().startswith(
-                "acceptance criteria"
-            ):
-                if current_story:
-
-                    story = " ".join(
-                        current_story
-                    ).strip()
-
-                    if story:
-                        stories.append(story)
-
-                    current_story = []
-
-                continue
-
-            current_story.append(line)
-
-        if current_story:
-
-            story = " ".join(
-                current_story
-            ).strip()
-
-            if story:
-                stories.append(story)
-
-    return stories
-
-
-# ============================================================
-# GET ALL ROADMAP ITEMS
-# ============================================================
-
-@router.get("/")
-def get_roadmap():
-
-    db: Session = SessionLocal()
-
-    try:
-
-        rows = (
-            db.query(
-                RoadmapItem,
-                FeatureRequest,
-            )
-            .outerjoin(
-                FeatureRequest,
-                FeatureRequest.id
-                == RoadmapItem.feature_id,
-            )
-            .order_by(
-                RoadmapItem.id.asc()
-            )
-            .all()
-        )
-
-        return [
-            serialize_roadmap_item(
-                item,
-                feature,
-            )
-            for item, feature in rows
-        ]
-
-    except Exception as exc:
-
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                f"Failed to fetch roadmap: "
-                f"{str(exc)}"
-            ),
-        )
-
-    finally:
-
-        db.close()
-
-
-# ============================================================
-# GENERATE ROADMAP REQUEST
-# ============================================================
-
-class PrioritizedFeatureRequest(BaseModel):
-
-    feature_id: int | None = None
-
-    feature_name: str = Field(
-        ...,
-        min_length=1,
-    )
-
-    description: str = Field(
-        ...,
-        min_length=1,
-    )
-
-    priority: str
-
-    rice_score: float | None = None
-
-    ice_score: float | None = None
-
-    dependencies: list[str] = Field(
-        default_factory=list,
-    )
-
-
-class GenerateRoadmapRequest(BaseModel):
-
-    # --------------------------------------------------------
-    # If PRD is selected from Roadmap Planner,
-    # this value is supplied.
-    # --------------------------------------------------------
-
-    prd_id: int | None = None
-
-    # --------------------------------------------------------
-    # Optional manually supplied features.
-    # --------------------------------------------------------
-
-    features: list[
-        PrioritizedFeatureRequest
-    ] | None = None
-
-    user_id: str | None = None
-
-
-# ============================================================
-# GET PRIORITIZED FEATURES FROM DATABASE
-# ============================================================
-
-def get_prioritized_features(
-    db: Session,
-) -> list[dict]:
-    """
-    Read the latest prioritization results from PostgreSQL.
-
-    PriorityScore.impact_level stores the High / Medium / Low
-    priority assigned by the Prioritization Agent.
-    """
-
-    rows = (
-        db.query(
-            FeatureRequest,
-            PriorityScore,
-        )
-        .join(
-            PriorityScore,
-            PriorityScore.feature_id
-            == FeatureRequest.id,
-        )
-        .order_by(
-            PriorityScore.rice_score.desc()
-        )
-        .all()
-    )
-
-    features = []
-
-    for feature, score in rows:
-
-        features.append(
-            {
-                "feature_id": feature.id,
-
-                "feature_name": (
-                    feature.title
-                    or f"Feature {feature.id}"
-                ),
-
-                "description": (
-                    feature.description
-                    or "No description provided."
-                ),
-
-                # PrioritizationAgent saves the assigned
-                # priority in impact_level.
-                "priority": (
-                    score.impact_level
-                    or "Medium"
-                ),
-
-                "rice_score": (
-                    score.rice_score
-                ),
-
-                "ice_score": (
-                    score.ice_score
-                ),
-
-                # Dependencies are not currently stored
-                # by the Prioritization module.
-                "dependencies": [],
-            }
-        )
-
-    return features
-
-
-# ============================================================
-# BUILD ROADMAP FEATURES FROM PRD
-# ============================================================
-
-def build_features_from_prd(
-    prd: PRDDocument,
-) -> list[dict]:
-    """
-    Convert one generated PRD into roadmap features.
-
-    The selected PRD is the ONLY source used here.
-
-    User Story 1 -> Roadmap Feature 1
-    User Story 2 -> Roadmap Feature 2
-    User Story 3 -> Roadmap Feature 3
-
-    This prevents unrelated prioritized features from
-    entering the selected PRD's roadmap.
-    """
-
-    features: list[dict] = []
-
-    user_stories = extract_prd_user_stories(
-        prd.user_stories
-    )
-
-    # --------------------------------------------------------
-    # If the PRD contains user stories
-    # --------------------------------------------------------
-
-    if user_stories:
-
-        for index, story in enumerate(
-            user_stories,
-            start=1,
-        ):
-
-            features.append(
-                {
-                    "feature_id": prd.feature_id,
-
-                    "feature_name": (
-                        f"{prd.title or 'Product Feature'} "
-                        f"- Task {index}"
-                    ),
-
-                    "description": story,
-
-                    # PRD-selected features are treated as
-                    # high priority unless explicit priority
-                    # information exists elsewhere.
-                    "priority": "High",
-
-                    "rice_score": None,
-
-                    "ice_score": None,
-
-                    "dependencies": [],
-                }
-            )
-
-        return features
-
-    # --------------------------------------------------------
-    # If user stories are not available,
-    # use the PRD itself as one roadmap feature.
-    # --------------------------------------------------------
-
-    features.append(
-        {
-            "feature_id": prd.feature_id,
-
-            "feature_name": (
-                prd.title
-                or "Product Feature"
-            ),
-
-            "description": (
-                prd.problem_statement
-                or prd.title
-                or "Product feature"
-            ),
-
-            "priority": "High",
-
-            "rice_score": None,
-
-            "ice_score": None,
-
-            "dependencies": [],
-        }
-    )
-
-    return features
-
-
-# ============================================================
-# GENERATE ROADMAP
-# ============================================================
-
-@router.post("/generate")
-def generate_roadmap(
-    data: GenerateRoadmapRequest,
-):
-
-    db: Session = SessionLocal()
-
-    try:
-
-        # ====================================================
-        # STEP 1
-        # INITIALIZE ROADMAP AGENT
-        # ====================================================
-
-        roadmap_agent = RoadmapAgent()
-
-        # ====================================================
-        # STEP 2
-        # DETERMINE ROADMAP SOURCE
-        # ====================================================
-
-        prioritized_features: list[dict] = []
-
-        prd = None
-
-        # ====================================================
-        # OPTION A
-        # SPECIFIC PRD SELECTED
-        # ====================================================
-
-        # IMPORTANT:
-        #
-        # If prd_id exists, the selected PRD gets priority.
-        #
-        # We DO NOT load all 33 prioritized features.
-        #
-        # This is the main fix for the Roadmap Planner UI.
-        #
-
-        if data.prd_id is not None:
-
-            prd = (
-                db.query(PRDDocument)
-                .filter(
-                    PRDDocument.id
-                    == data.prd_id
-                )
-                .first()
-            )
-
-            if not prd:
-
-                raise HTTPException(
-                    status_code=404,
-                    detail=(
-                        f"PRD {data.prd_id} "
-                        "not found."
-                    ),
-                )
-
-            # ------------------------------------------------
-            # Convert selected PRD into roadmap features.
-            # ------------------------------------------------
-
-            prioritized_features = (
-                build_features_from_prd(
-                    prd
-                )
-            )
-
-        # ====================================================
-        # OPTION B
-        # EXPLICIT FEATURES SUPPLIED
-        # ====================================================
-
-        elif data.features:
-
-            prioritized_features = [
-                feature.model_dump()
-                for feature in data.features
-            ]
-
-        # ====================================================
-        # OPTION C
-        # NO PRD AND NO EXPLICIT FEATURES
-        # ====================================================
-
-        else:
-
-            # In this case we generate the overall product
-            # roadmap using Prioritization Agent results.
-
-            prioritized_features = (
-                get_prioritized_features(
-                    db
-                )
-            )
-
-        # ====================================================
-        # STEP 3
-        # VALIDATE FEATURES
-        # ====================================================
-
-        if not prioritized_features:
-
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "No features available "
-                    "for roadmap generation."
-                ),
-            )
-
-        # ====================================================
-        # STEP 4
-        # CONVERT TO ROADMAP AGENT FORMAT
-        # ====================================================
-
-        roadmap_features: list[dict] = []
-
-        for index, feature in enumerate(
-            prioritized_features,
-            start=1,
-        ):
-
-            if not isinstance(
-                feature,
-                dict,
-            ):
-
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Feature {index} "
-                        "must be an object."
-                    ),
-                )
-
-            # ------------------------------------------------
-            # Feature name
-            # ------------------------------------------------
-
-            feature_name = (
-                feature.get(
-                    "feature_name",
-                    "",
-                )
-                or feature.get(
-                    "feature_title",
-                    "",
-                )
-            )
-
-            feature_name = (
-                str(feature_name)
-                .strip()
-            )
-
-            if not feature_name:
-
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Feature {index} "
-                        "name cannot be empty."
-                    ),
-                )
-
-            # ------------------------------------------------
-            # Description
-            # ------------------------------------------------
-
-            description = (
-                feature.get(
-                    "description",
-                    "",
-                )
-                or feature.get(
-                    "feature_description",
-                    "",
-                )
-                or "No description provided."
-            )
-
-            description = (
-                str(description)
-                .strip()
-            )
-
-            if not description:
-
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Feature {index} "
-                        "description cannot be empty."
-                    ),
-                )
-
-            # ------------------------------------------------
-            # Priority
-            # ------------------------------------------------
-
-            priority = feature.get(
-                "priority",
-                "Medium",
-            )
-
-            priority = str(
-                priority
-            ).strip()
-
-            # Normalize priority values.
-            priority_map = {
-                "high": "High",
-                "medium": "Medium",
-                "low": "Low",
-            }
-
-            priority = priority_map.get(
-                priority.lower(),
-                priority,
-            )
-
-            if priority not in {
-                "High",
-                "Medium",
-                "Low",
-            }:
-
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Feature {index} "
-                        f"has invalid priority: "
-                        f"{priority}"
-                    ),
-                )
-
-            # ------------------------------------------------
-            # Dependencies
-            # ------------------------------------------------
-
-            dependencies = feature.get(
-                "dependencies",
-                [],
-            )
-
-            if dependencies is None:
-                dependencies = []
-
-            if not isinstance(
-                dependencies,
-                list,
-            ):
-
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Feature {index} "
-                        "dependencies must be a list."
-                    ),
-                )
-
-            # Make sure every dependency is a string.
-            dependencies = [
-                str(dep).strip()
-                for dep in dependencies
-                if str(dep).strip()
-            ]
-
-            # ------------------------------------------------
-            # Build final Roadmap Agent input
-            # ------------------------------------------------
-
-            roadmap_features.append(
-                {
-                    "feature_id": feature.get(
-                        "feature_id"
-                    ),
-
-                    "feature_name": feature_name,
-
-                    "description": description,
-
-                    "priority": priority,
-
-                    "rice_score": feature.get(
-                        "rice_score"
-                    ),
-
-                    "ice_score": feature.get(
-                        "ice_score"
-                    ),
-
-                    "dependencies": dependencies,
-                }
-            )
-
-        # ====================================================
-        # STEP 5
-        # GENERATE STRUCTURED ROADMAP
-        # ====================================================
-
-        try:
-
-            roadmap = (
-                roadmap_agent.generate_roadmap(
-                    roadmap_features
-                )
-            )
-
-        except ValueError as exc:
-
-            raise HTTPException(
-                status_code=400,
-                detail=str(exc),
-            )
-
-        except RuntimeError as exc:
-
-            error_message = str(exc)
-
-            if (
-                "quota"
-                in error_message.lower()
-                or "429"
-                in error_message
-                or "resource_exhausted"
-                in error_message.lower()
-            ):
-
-                raise HTTPException(
-                    status_code=429,
-                    detail=(
-                        "Gemini API quota exceeded. "
-                        "Please try again later."
-                    ),
-                )
-
-            raise HTTPException(
-                status_code=500,
-                detail=error_message,
-            )
-
-        # ====================================================
-        # STEP 6
-        # SAVE ROADMAP ITEMS
-        # ====================================================
-
-        saved_items = []
-
-        # Map feature names back to original FeatureRequest IDs.
-        feature_id_map = {}
-
-        for input_feature in roadmap_features:
-
-            name = (
-                input_feature[
-                    "feature_name"
-                ]
-                .strip()
-                .lower()
-            )
-
-            feature_id_map[name] = (
-                input_feature.get(
-                    "feature_id"
-                )
-            )
-
-        # ----------------------------------------------------
-        # Save every roadmap feature.
-        # ----------------------------------------------------
-
-        for index, roadmap_feature in enumerate(
-            roadmap.features,
-            start=1,
-        ):
-
-            title = make_feature_title(
-                roadmap_feature.feature_name
-            )
-
-            description = (
-                roadmap_feature.description
-                or ""
-            )
-
-            status = (
-                roadmap_feature.status
-                or "Planned"
-            )
-
-            if status not in VALID_STATUSES:
-
-                status = "Planned"
-
-            release = (
-                roadmap_feature.release
-                or f"Sprint {index}"
-            )
-
-            # ------------------------------------------------
-            # Find original FeatureRequest
-            # ------------------------------------------------
-
-            normalized_name = (
-                roadmap_feature.feature_name
-                .strip()
-                .lower()
-            )
-
-            original_feature_id = (
-                feature_id_map.get(
-                    normalized_name
-                )
-            )
-
-            feature = None
-
-            if original_feature_id:
-
-                feature = (
-                    db.query(
-                        FeatureRequest
-                    )
-                    .filter(
-                        FeatureRequest.id
-                        == original_feature_id
-                    )
-                    .first()
-                )
-
-            # ------------------------------------------------
-            # If no existing FeatureRequest exists,
-            # create one.
-            #
-            # This is mainly useful for PRD-generated
-            # roadmap tasks.
-            # ------------------------------------------------
-
-            if feature is None:
-
-                feature = FeatureRequest(
-                    title=title,
-
-                    description=description,
-
-                    votes=0,
-
-                    submitted_by=None,
-
-                    request_date=date.today(),
-                )
-
-                db.add(feature)
-
-                db.flush()
-
-            # ------------------------------------------------
-            # Create RoadmapItem
-            # ------------------------------------------------
-
-            item = RoadmapItem(
-                feature_id=feature.id,
-
-                # Sprint/release is stored in phase.
-                phase=release,
-
-                status=status,
-            )
-
-            db.add(item)
-
-            db.flush()
-
-            saved_items.append(
-                {
-                    "id": item.id,
-
-                    "feature_id": feature.id,
-
-                    "title": feature.title,
-
-                    "description": (
-                        feature.description
-                    ),
-
-                    "phase": release,
-
-                    # Kept for frontend compatibility.
-                    "quarter": "",
-
-                    "status": status,
-
-                    "progress": PROGRESS_MAP.get(
-                        status,
-                        0,
-                    ),
-
-                    "order": index,
-
-                    "milestone": (
-                        roadmap_feature.milestone
-                    ),
-
-                    "reason": (
-                        roadmap_feature.reason
-                    ),
-
-                    "priority": (
-                        roadmap_feature.priority
-                    ),
-
-                    "rice_score": (
-                        roadmap_feature.rice_score
-                    ),
-
-                    "ice_score": (
-                        roadmap_feature.ice_score
-                    ),
-
-                    "dependencies": (
-                        roadmap_feature.dependencies
-                    ),
-
-                    "unresolved_dependencies": (
-                        roadmap_feature
-                        .unresolved_dependencies
-                    ),
-
-                    "blocked_by": (
-                        roadmap_feature.blocked_by
-                    ),
-                }
-            )
-
-        # ====================================================
-        # STEP 7
-        # COMMIT
-        # ====================================================
-
-        db.commit()
-
-        # ====================================================
-        # STEP 8
-        # RETURN RESPONSE
-        # ====================================================
-
-        return {
-            "success": True,
-
-            "message": (
-                f"{len(saved_items)} roadmap features "
-                "generated successfully."
-            ),
-
-            # If a PRD was selected this will contain
-            # the selected PRD ID.
-            "prd_id": data.prd_id,
-
-            "roadmap": {
-                "roadmap_name": (
-                    roadmap.roadmap_name
-                ),
-
-                "timeline": (
-                    roadmap.timeline
-                ),
-
-                "features": [
-                    roadmap_feature_to_dict(
-                        feature
-                    )
-                    for feature in roadmap.features
-                ],
-            },
-
-            "items": saved_items,
-
-            # Frontend compatibility.
-            "data": saved_items,
-        }
-
-    except HTTPException:
-
-        db.rollback()
-
-        raise
-
-    except Exception as exc:
-
-        db.rollback()
-
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                f"Roadmap generation failed: "
-                f"{str(exc)}"
-            ),
-        )
-
-    finally:
-
-        db.close()
 
 
 # ============================================================
 # GENERATE ROADMAP FROM PRD
 # ============================================================
 
-class GenerateFromPRDRequest(BaseModel):
-
-    prd_id: int
-
-    user_id: str | None = None
-
-
-@router.post("/generate-from-prd")
-def generate_from_prd(
-    data: GenerateFromPRDRequest,
+@router.post("/generate")
+def generate_roadmap(
+    data: GenerateRoadmapRequest
 ):
 
-    return generate_roadmap(
-        GenerateRoadmapRequest(
-            prd_id=data.prd_id,
-            features=None,
-            user_id=data.user_id,
-        )
-    )
-
-
-# ============================================================
-# ADD MANUAL MILESTONE
-# ============================================================
-
-class NewMilestoneRequest(BaseModel):
-
-    title: str
-
-    status: str = "Planned"
-
-
-@router.post("/")
-def add_milestone(
-    data: NewMilestoneRequest,
-):
-
-    db: Session = SessionLocal()
+    db = SessionLocal()
 
     try:
 
-        title = data.title.strip()
+        # ====================================================
+        # 1. FIND PRD
+        # ====================================================
 
-        if not title:
-
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Milestone title "
-                    "cannot be empty."
-                ),
-            )
-
-        status = data.status
-
-        if status not in VALID_STATUSES:
-
-            status = "Planned"
-
-        feature = FeatureRequest(
-            title=make_feature_title(
-                title
-            ),
-
-            description=title,
-
-            votes=0,
-
-            submitted_by=None,
-
-            request_date=date.today(),
-        )
-
-        db.add(feature)
-
-        db.flush()
-
-        item = RoadmapItem(
-            feature_id=feature.id,
-
-            phase="Sprint 1",
-
-            status=status,
-        )
-
-        db.add(item)
-
-        db.commit()
-
-        db.refresh(item)
-
-        return serialize_roadmap_item(
-            item,
-            feature,
-        )
-
-    except HTTPException:
-
-        db.rollback()
-
-        raise
-
-    except Exception as exc:
-
-        db.rollback()
-
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                f"Failed to create milestone: "
-                f"{str(exc)}"
-            ),
-        )
-
-    finally:
-
-        db.close()
-
-
-# ============================================================
-# UPDATE STATUS
-# ============================================================
-
-@router.put("/{item_id}/status")
-def update_status(
-    item_id: int,
-    status: str,
-):
-
-    db: Session = SessionLocal()
-
-    try:
-
-        if status not in VALID_STATUSES:
-
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Invalid status. "
-                    "Use Completed, In Progress, "
-                    "Planned, Blocked, or Backlog."
-                ),
-            )
-
-        item = (
-            db.query(RoadmapItem)
+        prd = (
+            db.query(PRDDocument)
             .filter(
-                RoadmapItem.id
-                == item_id
+                PRDDocument.id == data.prd_id
             )
             .first()
         )
 
-        if not item:
+        if not prd:
 
             raise HTTPException(
                 status_code=404,
-                detail=(
-                    "Roadmap item not found."
-                ),
+                detail="PRD not found."
             )
 
-        item.status = status
+        # ====================================================
+        # 2. CONVERT PRD INTO ROADMAP FEATURE
+        # ====================================================
 
-        db.commit()
-
-        db.refresh(item)
-
-        feature = (
-            db.query(FeatureRequest)
-            .filter(
-                FeatureRequest.id
-                == item.feature_id
-            )
-            .first()
+        roadmap_input = make_feature_for_roadmap(
+            db,
+            prd
         )
 
-        return serialize_roadmap_item(
-            item,
-            feature,
+        print()
+        print("=" * 70)
+        print("ROADMAP INPUT")
+        print("=" * 70)
+
+        print(roadmap_input)
+
+        # ====================================================
+        # 3. CREATE ROADMAP AGENT
+        # ====================================================
+
+        agent = RoadmapAgent()
+
+        # ====================================================
+        # 4. GENERATE ROADMAP
+        # ====================================================
+
+        roadmap = agent.generate_roadmap(
+            [roadmap_input]
         )
 
-    except HTTPException:
+        # ====================================================
+        # 5. SERIALIZE ROADMAP
+        # ====================================================
 
-        db.rollback()
+        roadmap_features = []
 
-        raise
+        for index, feature in enumerate(
+            roadmap.features,
+            start=1
+        ):
 
-    except Exception as exc:
-
-        db.rollback()
-
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                f"Failed to update status: "
-                f"{str(exc)}"
-            ),
-        )
-
-    finally:
-
-        db.close()
-
-
-# ============================================================
-# DELETE ROADMAP ITEM
-# ============================================================
-
-@router.delete("/{item_id}")
-def delete_milestone(
-    item_id: int,
-):
-
-    db: Session = SessionLocal()
-
-    try:
-
-        item = (
-            db.query(RoadmapItem)
-            .filter(
-                RoadmapItem.id
-                == item_id
-            )
-            .first()
-        )
-
-        if not item:
-
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    "Roadmap item not found."
-                ),
-            )
-
-        feature_id = item.feature_id
-
-        db.delete(item)
-
-        db.flush()
-
-        if feature_id:
-
-            feature = (
-                db.query(
-                    FeatureRequest
+            roadmap_features.append(
+                serialize_roadmap_feature(
+                    feature,
+                    index
                 )
-                .filter(
-                    FeatureRequest.id
-                    == feature_id
-                )
-                .first()
             )
 
-            if feature:
+        # ====================================================
+        # 6. SAFETY CHECK
+        # ====================================================
+        #
+        # The Roadmap Agent should preserve the feature name.
+        # If Gemini slightly changes it, we restore the original
+        # feature name instead of returning an invalid roadmap.
+        #
 
-                db.delete(feature)
+        original_name = roadmap_input["feature_name"]
 
-        db.commit()
+        for feature in roadmap_features:
+
+            feature["feature_name"] = original_name
+            feature["title"] = original_name
+
+        # ====================================================
+        # 7. SAVE ROADMAP ITEM
+        # ====================================================
+
+        feature_request = get_feature_for_prd(
+            db,
+            prd
+        )
+
+        if feature_request:
+
+            # Remove previous roadmap items for this feature
+            # so repeated generation does not create duplicates.
+
+            db.query(RoadmapItem).filter(
+                RoadmapItem.feature_id ==
+                feature_request.id
+            ).delete(
+                synchronize_session=False
+            )
+
+            for roadmap_feature in roadmap_features:
+
+                release = roadmap_feature.get(
+                    "release",
+                    "Sprint 1"
+                )
+
+                status = roadmap_feature.get(
+                    "status",
+                    "Planned"
+                )
+
+                roadmap_item = RoadmapItem(
+                    feature_id=feature_request.id,
+                    phase=release,
+                    status=status,
+                )
+
+                db.add(roadmap_item)
+
+            db.commit()
+
+        # ====================================================
+        # 8. PRINT RESULT
+        # ====================================================
+
+        print()
+        print("=" * 70)
+        print("PRODUCT ROADMAP")
+        print("=" * 70)
+
+        print(
+            "Roadmap:",
+            roadmap.roadmap_name
+        )
+
+        print(
+            "Timeline:",
+            roadmap.timeline
+        )
+
+        for index, item in enumerate(
+            roadmap_features,
+            start=1
+        ):
+
+            print()
+            print(
+                f"{index}. {item['feature_name']}"
+            )
+
+            print(
+                "   Description:",
+                item["description"]
+            )
+
+            print(
+                "   Priority:",
+                item["priority"]
+            )
+
+            print(
+                "   RICE Score:",
+                item["rice_score"]
+            )
+
+            print(
+                "   ICE Score:",
+                item["ice_score"]
+            )
+
+            print(
+                "   Release:",
+                item["release"]
+            )
+
+            print(
+                "   Milestone:",
+                item["milestone"]
+            )
+
+            print(
+                "   Status:",
+                item["status"]
+            )
+
+            print(
+                "   Dependencies:",
+                item["dependencies"]
+            )
+
+            print(
+                "   Unresolved Dependencies:",
+                item["unresolved_dependencies"]
+            )
+
+            print(
+                "   Blocked By:",
+                item["blocked_by"]
+            )
+
+            print(
+                "   Blocker:",
+                item["blocker"]
+            )
+
+            print(
+                "   Resolution Steps:",
+                item["resolution_steps"]
+            )
+
+            print(
+                "   Next Action:",
+                item["next_action"]
+            )
+
+            print(
+                "   Reason:",
+                item["reason"]
+            )
+
+        print()
+        print("=" * 70)
+
+        # ====================================================
+        # 9. RETURN RESPONSE TO FRONTEND
+        # ====================================================
 
         return {
             "success": True,
 
-            "message": (
-                "Roadmap milestone deleted "
-                "successfully."
-            ),
+            "prd_id": prd.id,
+
+            "document_id": prd.id,
+
+            "roadmap_name": roadmap.roadmap_name,
+
+            "timeline": roadmap.timeline,
+
+            "features": roadmap_features,
+
+            "roadmap": roadmap_features,
+
+            "data": {
+                "features": roadmap_features
+            }
         }
 
     except HTTPException:
+        raise
+
+    except ValueError as exc:
 
         db.rollback()
 
-        raise
+        print()
+        print(
+            "ROADMAP VALIDATION ERROR:",
+            str(exc)
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        )
 
     except Exception as exc:
 
         db.rollback()
 
+        print()
+        print(
+            "ROADMAP GENERATION ERROR:",
+            str(exc)
+        )
+
         raise HTTPException(
             status_code=500,
-            detail=(
-                f"Failed to delete roadmap item: "
-                f"{str(exc)}"
-            ),
+            detail=f"Roadmap generation failed: {str(exc)}"
+        )
+
+    finally:
+
+        db.close()
+
+
+# ============================================================
+# GET ALL SAVED ROADMAP ITEMS
+# ============================================================
+
+@router.get("/")
+def get_roadmap():
+
+    db = SessionLocal()
+
+    try:
+
+        rows = (
+            db.query(
+                RoadmapItem,
+                FeatureRequest
+            )
+            .outerjoin(
+                FeatureRequest,
+                FeatureRequest.id ==
+                RoadmapItem.feature_id
+            )
+            .order_by(
+                RoadmapItem.id
+            )
+            .all()
+        )
+
+        result = []
+
+        for index, (item, feature) in enumerate(
+            rows,
+            start=1
+        ):
+
+            status = (
+                item.status
+                or "Planned"
+            )
+
+            progress = progress_from_status(
+                status
+            )
+
+            result.append({
+
+                "id": item.id,
+
+                "feature_id": item.feature_id,
+
+                "feature_name": (
+                    feature.title
+                    if feature
+                    else "Unknown Feature"
+                ),
+
+                "title": (
+                    feature.title
+                    if feature
+                    else "Unknown Feature"
+                ),
+
+                "description": (
+                    feature.description
+                    if feature
+                    else ""
+                ),
+
+                "phase": item.phase or "",
+
+                "release": item.phase or "",
+
+                "sprint": item.phase or "",
+
+                "status": status,
+
+                "progress": progress,
+
+                "start_date": (
+                    str(item.start_date)
+                    if item.start_date
+                    else ""
+                ),
+
+                "end_date": (
+                    str(item.end_date)
+                    if item.end_date
+                    else ""
+                ),
+
+                "priority": "Medium",
+
+                "rice_score": None,
+
+                "ice_score": None,
+
+                "dependencies": [],
+
+                "unresolved_dependencies": [],
+
+                "blocked_by": [],
+
+                "blocker": "",
+
+                "resolution_steps": [],
+
+                "next_action": "",
+
+                "reason": "",
+            })
+
+        return result
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load roadmap: {str(exc)}"
+        )
+
+    finally:
+
+        db.close()
+
+
+# ============================================================
+# GET SINGLE PRD
+# ============================================================
+
+@router.get("/prd/{prd_id}")
+def get_prd_for_roadmap(
+    prd_id: int
+):
+
+    db = SessionLocal()
+
+    try:
+
+        prd = (
+            db.query(PRDDocument)
+            .filter(
+                PRDDocument.id == prd_id
+            )
+            .first()
+        )
+
+        if not prd:
+
+            raise HTTPException(
+                status_code=404,
+                detail="PRD not found."
+            )
+
+        return {
+            "success": True,
+
+            "id": prd.id,
+
+            "prd_id": prd.id,
+
+            "document_id": prd.id,
+
+            "title": prd.title,
+
+            "problem_statement":
+                prd.problem_statement,
+
+            "objectives":
+                prd.objectives,
+
+            "user_stories":
+                prd.user_stories,
+
+            "acceptance_criteria":
+                prd.acceptance_criteria,
+
+            "success_metrics":
+                prd.success_metrics,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load PRD: {str(exc)}"
         )
 
     finally:
