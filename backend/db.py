@@ -20,7 +20,12 @@ load_dotenv(dotenv_path=ENV_FILE)
 # Database URL
 # -------------------------------------------------
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace(
+        "postgresql://",
+        "postgresql+psycopg2://",
+        1
+    )
 
 if DATABASE_URL is None:
     raise ValueError(
