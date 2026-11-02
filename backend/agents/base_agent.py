@@ -1,4 +1,4 @@
-from config.gemini import llm as gemini_llm
+from config.openrouter import llm
 from db import SessionLocal
 
 
