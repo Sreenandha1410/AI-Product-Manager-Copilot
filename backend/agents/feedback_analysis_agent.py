@@ -1,4 +1,4 @@
-from config.gemini import llm
+from config.openrouter import llm
 from ai_schemas.feedback_analysis import FeedbackAnalysis
 
 
