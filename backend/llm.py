@@ -3,6 +3,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
+from config.openrouter import llm
+
 
 # ----------------------------------------
 # Load Environment Variables
