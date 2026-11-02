@@ -1,6 +1,6 @@
 # backend/agents/roadmap_agent.py
 
-from config.gemini import llm
+from config.openrouter import llm
 from prompts.roadmap_prompt import roadmap_prompt
 from ai_schemas.roadmap_schema import Roadmap
 from agents.base_agent import BaseAgent
