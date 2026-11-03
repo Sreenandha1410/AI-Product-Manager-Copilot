@@ -1,7 +1,7 @@
-```python
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+# Import routers
 from routes.auth import router as auth_router
 from routes.dashboard import router as dashboard_router
 from routes.analytics import router as analytics_router
@@ -16,11 +16,13 @@ from routes.aggregation import router as aggregation_router
 from routes.prioritization import router as prioritization_router
 
 
+# Initialize FastAPI application
 app = FastAPI(
     title="AI Product Manager Copilot API",
     version="1.0.0",
-    debug=False,
+    debug=False
 )
+
 
 # CORS Configuration
 origins = [
@@ -30,6 +32,7 @@ origins = [
     "http://127.0.0.1:3000",
 ]
 
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -38,12 +41,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-print("Registering routers...")
 
-# Register all routers
-app.include_router(themes_router)
-app.include_router(aggregation_router)
-app.include_router(prioritization_router)
+# Register API routers
+print("Registering routers...")
 
 app.include_router(auth_router)
 app.include_router(dashboard_router)
@@ -54,16 +54,24 @@ app.include_router(prd_router)
 app.include_router(roadmap_router)
 app.include_router(chat_router)
 app.include_router(settings_router)
+app.include_router(themes_router)
+app.include_router(aggregation_router)
+app.include_router(prioritization_router)
 
-print("Routers registered successfully.")
+print("All routers registered successfully.")
 
 
+# Root endpoint
 @app.get("/")
 def home():
-    return {"message": "Backend Running"}
+    return {
+        "message": "AI Product Manager Copilot Backend Running"
+    }
 
 
+# Health check endpoint
 @app.get("/health")
 def health():
-    return {"status": "healthy"}
-```
+    return {
+        "status": "healthy"
+    }
