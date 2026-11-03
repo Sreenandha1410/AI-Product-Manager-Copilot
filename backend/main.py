@@ -26,6 +26,7 @@ app = FastAPI(
 
 # CORS Configuration
 origins = [
+    "https://ai-product-manager-copilot-three.vercel.app",
     "https://ai-product-manager-copilot-5fynelso0-green-atlas.vercel.app",
     "https://ai-product-manager-copilot-b7katei9e-green-atlas.vercel.app",
     "http://localhost:3000",
